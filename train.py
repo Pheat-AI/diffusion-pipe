@@ -91,6 +91,7 @@ def set_config_defaults(config):
     config.setdefault('eval_every_n_steps', None)
     config.setdefault('eval_every_n_epochs', None)
     config.setdefault('eval_before_first_step', True)
+    config.setdefault('enable_tensorboard', False)
 
 
 def get_most_recent_run_dir(output_dir):
@@ -150,14 +151,14 @@ def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_acc
         for quantile in TIMESTEP_QUANTILES_FOR_EVAL:
             loss = evaluate_single(model_engine, eval_dataloader, eval_gradient_accumulation_steps, quantile, pbar=pbar)
             losses.append(loss)
-            if is_main_process():
+            if is_main_process() and tb_writer is not None:
                 tb_writer.add_scalar(f'{name}/loss_quantile_{quantile:.2f}', loss, step)
         avg_loss = sum(losses) / len(losses)
-        if is_main_process():
+        if is_main_process() and tb_writer is not None:
             tb_writer.add_scalar(f'{name}/loss', avg_loss, step)
 
     duration = time.time() - start
-    if is_main_process():
+    if is_main_process() and tb_writer is not None:
         tb_writer.add_scalar('eval/eval_time_sec', duration, step)
         pbar.close()
 
@@ -200,19 +201,9 @@ if __name__ == '__main__':
     torch.cuda.set_device(dist.get_rank())
 
     model_type = config['model']['type']
-
-    if model_type == 'flux':
-        from models import flux
-        model = flux.FluxPipeline(config)
-    elif model_type == 'ltx-video':
-        from models import ltx_video
-        model = ltx_video.LTXVideoPipeline(config)
-    elif model_type == 'hunyuan-video':
+    if model_type == 'hunyuan-video':
         from models import hunyuan_video
         model = hunyuan_video.HunyuanVideoPipeline(config)
-    elif model_type == 'sdxl':
-        from models import sdxl
-        model = sdxl.SDXLPipeline(config)
     else:
         raise NotImplementedError(f'Model type {model_type} is not implemented')
 
@@ -447,7 +438,7 @@ if __name__ == '__main__':
     }
 
     epoch = train_dataloader.epoch
-    tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
+    tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() and config['enable_tensorboard'] else None
     saver = utils.saver.Saver(args, config, is_adapter, run_dir, model, train_dataloader, model_engine, pipeline_model)
 
     if config['eval_before_first_step'] and not resume_from_checkpoint:
@@ -467,19 +458,20 @@ if __name__ == '__main__':
         new_epoch, checkpointed, saved = saver.process_epoch(epoch, step)
         finished_epoch = True if new_epoch != epoch else False
 
-        if is_main_process() and step % config['logging_steps'] == 0:
+        if is_main_process() and tb_writer is not None and step % config['logging_steps'] == 0:
             tb_writer.add_scalar(f'train/loss', loss, step)
 
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
             evaluate(model_engine, eval_dataloaders, tb_writer, step, config['eval_gradient_accumulation_steps'])
 
         if finished_epoch:
-            if is_main_process():
+            if is_main_process() and tb_writer is not None:
                 tb_writer.add_scalar(f'train/epoch_loss', epoch_loss/num_steps, epoch)
             epoch_loss = 0
             num_steps = 0
             epoch = new_epoch
             if epoch is None:
+
                 break
 
         saver.process_step(step)
