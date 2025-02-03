@@ -259,7 +259,7 @@ if __name__ == '__main__':
 
     # if this is a new run, create a new dir for it
     if not resume_from_checkpoint and is_main_process():
-        run_dir = os.path.join(config['output_dir'], datetime.now(timezone.utc).strftime('%Y%m%d_%H-%M-%S'))
+        run_dir = os.path.join(config['output_dir'], "run")
         os.makedirs(run_dir, exist_ok=True)
         shutil.copy(args.config, run_dir)
     # wait for all processes then get the most recent dir (may have just been created)
