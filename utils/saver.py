@@ -3,6 +3,7 @@ import os
 import shutil
 import time
 import sys
+import tempfile
 
 import torch
 from deepspeed import comm as dist
@@ -60,29 +61,35 @@ class Saver:
         stage_id = self.model_engine.grid.get_pipe_parallel_rank()
         save_dir = self.save_root / name
         tmp_dir = save_dir / 'tmp'
-        if dp_id == 0 and stage_id == 0:
-            os.makedirs(tmp_dir, exist_ok=False)
-        dist.barrier()
-        if dp_id == 0:
-            partial_state_dict = {}
-            for name, p in self.pipeline_model.named_parameters():
-                if p.requires_grad:
-                    if not hasattr(p, 'original_name'):
-                        logger.warning(f'WARNING: parameter {name} requires_grad but does not have original_name. Not saving it.')
-                        continue
-                    # TODO: maybe this needs to change if we ever have non-lora adapters?
-                    partial_state_dict[p.original_name.replace('.default', '').replace('.modules_to_save', '')] = p.detach()
-                    if 'save_dtype' in self.config:
-                        convert_state_dict_dtype(partial_state_dict, self.config['save_dtype'])
-            torch.save(partial_state_dict, tmp_dir / f'state_dict_{stage_id}.bin')
-        dist.barrier()
-        if dp_id == 0 and stage_id == 0:
-            state_dict = {}
-            for path in tmp_dir.glob('*.bin'):
-                state_dict.update(torch.load(path, weights_only=True, map_location='cpu'))
-            self.model.save_adapter(save_dir, state_dict)
-            shutil.copy(self.args.config, save_dir)
-            shutil.rmtree(tmp_dir)
+        
+        # Use a local temporary directory instead of GCS
+        with tempfile.TemporaryDirectory() as local_tmp_dir:
+            local_tmp_dir = Path(local_tmp_dir)
+            
+            if dp_id == 0 and stage_id == 0:
+                os.makedirs(save_dir, exist_ok=True)
+            
+            dist.barrier()
+            if dp_id == 0:
+                partial_state_dict = {}
+                for name, p in self.pipeline_model.named_parameters():
+                    if p.requires_grad:
+                        if not hasattr(p, 'original_name'):
+                            logger.warning(f'WARNING: parameter {name} requires_grad but does not have original_name. Not saving it.')
+                            continue
+                        partial_state_dict[p.original_name.replace('.default', '').replace('.modules_to_save', '')] = p.detach()
+                        if 'save_dtype' in self.config:
+                            convert_state_dict_dtype(partial_state_dict, self.config['save_dtype'])
+                torch.save(partial_state_dict, local_tmp_dir / f'state_dict_{stage_id}.bin')
+            
+            dist.barrier()
+            if dp_id == 0 and stage_id == 0:
+                state_dict = {}
+                for path in local_tmp_dir.glob('*.bin'):
+                    state_dict.update(torch.load(path, weights_only=True, map_location='cpu'))
+                self.model.save_adapter(save_dir, state_dict)
+                shutil.copy(self.args.config, save_dir)
+                # No need to cleanup tmp_dir as it's handled by the context manager
 
     def save_full_model(self, name, max_shard_size='5GB'):
         dp_id = self.model_engine.grid.get_data_parallel_rank()
