@@ -35,6 +35,7 @@ parser.add_argument('--local_rank', type=int, default=-1,
 parser.add_argument('--resume_from_checkpoint', action='store_true', default=None, help='resume training from the most recent checkpoint')
 parser.add_argument('--regenerate_cache', action='store_true', default=None, help='Force regenerate cache. Useful if none of the files have changed but their contents have, e.g. modified captions.')
 parser.add_argument('--cache_only', action='store_true', default=None, help='Cache model inputs then exit.')
+parser.add_argument('--i_know_what_i_am_doing', action='store_true', default=None, help="Skip certain checks and overrides. You may end up using settings that won't work.")
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
 
@@ -218,16 +219,18 @@ if __name__ == '__main__':
 
     with open(config['dataset']) as f:
         dataset_config = toml.load(f)
+    gradient_release = config['optimizer'].get('gradient_release', False)
     ds_config = {
         'train_micro_batch_size_per_gpu': config.get('micro_batch_size_per_gpu', 1),
         'gradient_accumulation_steps': config.get('gradient_accumulation_steps', 1),
-        'gradient_clipping': config.get('gradient_clipping', 1.0),
+        # Can't do gradient clipping with gradient release, since there are no grads at the end of the step anymore.
+        'gradient_clipping': 0. if gradient_release else config.get('gradient_clipping', 1.0),
         'steps_per_print': config.get('steps_per_print', 1),
     }
     caching_batch_size = config.get('caching_batch_size', 1)
     dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
 
-    train_data = dataset_util.Dataset(dataset_config, model)
+    train_data = dataset_util.Dataset(dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
     dataset_manager.register(train_data)
 
     eval_data_map = {}
@@ -240,7 +243,7 @@ if __name__ == '__main__':
             config_path = eval_dataset['config']
         with open(config_path) as f:
             eval_dataset_config = toml.load(f)
-        eval_data_map[name] = dataset_util.Dataset(eval_dataset_config, model)
+        eval_data_map[name] = dataset_util.Dataset(eval_dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
         dataset_manager.register(eval_data_map[name])
 
     dataset_manager.cache()
@@ -329,7 +332,7 @@ if __name__ == '__main__':
             # As part of this, any grads that are None are set to zeros. We're doing gradient release to save memory,
             # so we have to avoid this.
             def _exec_reduce_grads(self):
-                assert self.mpu.get_data_parallel_world_size() == 1, 'Data parallel world size must be 1. Make sure pipeline_stages = num_gpus.'
+                assert self.mpu.get_data_parallel_world_size() == 1, 'When using gradient release, data parallel world size must be 1. Make sure pipeline_stages = num_gpus.'
                 return
             deepspeed.runtime.pipe.engine.PipelineEngine._INSTRUCTION_MAP[deepspeed.runtime.pipe.schedule.ReduceGrads] = _exec_reduce_grads
 
