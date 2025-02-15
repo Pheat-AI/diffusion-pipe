@@ -5,6 +5,19 @@
 # as many times as the length of this list.
 # If you just want to use predetermined (width, height, frames) size buckets, see the example cosmos_dataset.toml
 # file for how you can do that.
+
+# Cosmos will only work properly with a fixed set of resolutions and frame lengths. Rather than setting up flexible aspect ratio buckets
+# and target resolutions, for this model you must directly specify the desired final size_buckets. This is for image training. For video
+# training, it seems you must use the full 121 frame length at these resolutions, which I can't even test because it would take too much
+# VRAM.
+# size_buckets = [
+#    [960, 960, 1],
+#    [960, 704, 1],
+#    [704, 960, 1],
+#    [1280, 704, 1],
+#    [704, 1280, 1],
+# ]
+
 resolutions = [512]
 
 # You can give resolutions as (width, height) pairs also. This doesn't do anything different, it's just
