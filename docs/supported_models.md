@@ -2,12 +2,13 @@
 
 | Model          | LoRA | Full Fine Tune | fp8/quantization |
 |----------------|------|----------------|------------------|
-|SDXL            |✅    |❌              |❌                |
+|SDXL            |✅    |✅              |❌                |
 |Flux            |✅    |✅              |✅                |
 |LTX-Video       |✅    |❌              |❌                |
 |HunyuanVideo    |✅    |❌              |✅                |
 |Cosmos          |✅    |❌              |❌                |
 |Lumina Image 2.0|✅    |✅              |❌                |
+|Wan2.1          |✅    |❌              |✅                |
 
 
 ## SDXL
@@ -20,12 +21,18 @@ dtype = 'bfloat16'
 #v_pred = true
 # Min SNR is supported. Same meaning as sd-scripts
 #min_snr_gamma = 5
+# Debiased estimation loss is supported. Same meaning as sd-scripts.
+#debiased_estimation_loss = true
+# You can set separate learning rates for unet and text encoders. If one of these isn't set, the optimizer learning rate will apply.
+unet_lr = 4e-5
+text_encoder_1_lr = 2e-5
+text_encoder_2_lr = 2e-5
 ```
-Basic SDXL LoRA support is implemented. It is lacking many options present in other training scripts. For example, you currently can't set separate learning rates for text encoders and unet.
+Unlike other models, for SDXL the text embeddings are not cached, and the text encoders are trained.
 
-Unlike other models, text embeddings are not cached, and the text encoders are trained.
+SDXL can be full fine tuned. Just remove the [adapter] table in the config file. You will need 48GB VRAM. 2x24GB GPUs works with pipeline_stages=2.
 
-SDXL LoRAs are saved in Kohya sd-scripts format.
+SDXL LoRAs are saved in Kohya sd-scripts format. SDXL full fine tune models are saved in the original SDXL checkpoint format.
 
 ## Flux
 ```
@@ -124,3 +131,18 @@ gradient_release = true
 This uses a custom AdamW8bit optimizer with Kahan summation (required for proper bf16 training), and it enables an experimental gradient release for more VRAM saving. If you are training only at 512 resolution, you can remove the gradient release part. If you have a >24GB GPU, or multiple GPUs and use pipeline parallelism, you can perhaps just use the normal adamw_optimi optimizer type.
 
 Lumina 2 LoRAs are saved in ComfyUI format.
+
+## Wan2.1
+```
+[model]
+type = 'wan'
+ckpt_path = '/data2/imagegen_models/Wan2.1-T2V-1.3B'
+dtype = 'bfloat16'
+# You can use fp8 for the transformer when training LoRA.
+#transformer_dtype = 'float8'
+timestep_sample_method = 'logit_normal'
+```
+
+Wan2.1 t2v variants are supported. Set ckpt_path to the original model checkpoint directory, e.g. [Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B). The 1.3B is tested and confirmed working. I haven't tried the 14B yet. I don't know what the optimal training settings are.
+
+Wan2.1 LoRAs are saved in ComfyUI format.

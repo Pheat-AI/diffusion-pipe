@@ -81,7 +81,7 @@ class SizeBucketDataset:
         self.cache_dir = self.path / 'cache' / self.model_name / f'cache_{size_bucket[0]}x{size_bucket[1]}x{size_bucket[2]}'
         os.makedirs(self.cache_dir, exist_ok=True)
         self.text_embedding_datasets = []
-        self.num_repeats = self.directory_config.get('num_repeats', 1)
+        self.num_repeats = self.directory_config['num_repeats']
 
     def cache_latents(self, map_fn, regenerate_cache=False, caching_batch_size=1):
         print(f'caching latents: {self.size_bucket}')
@@ -351,6 +351,7 @@ class DirectoryDataset:
         directory_config.setdefault('enable_ar_bucket', dataset_config.get('enable_ar_bucket', False))
         directory_config.setdefault('shuffle_tags', dataset_config.get('shuffle_tags', False))
         directory_config.setdefault('caption_prefix', dataset_config.get('caption_prefix', ''))
+        directory_config.setdefault('num_repeats', dataset_config.get('num_repeats', 1))
 
     def _metadata_map_fn(self):
         def fn(example):
@@ -714,7 +715,11 @@ class DatasetManager:
         # Free memory in all unneeded submodels. This is easier than trying to delete every reference.
         # TODO: check if this is actually freeing memory.
         for model in self.submodels:
-            model.to('meta')
+            if self.model.name == 'sdxl' and model is self.vae:
+                # If full fine tuning SDXL, we need to keep the VAE weights around for saving the model.
+                model.to('cpu')
+            else:
+                model.to('meta')
 
         dist.barrier()
         if is_main_process():
