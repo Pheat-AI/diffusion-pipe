@@ -64,9 +64,9 @@ ds_pipe_module.PipelineModule._count_layer_params = _count_all_layer_params
 
 
 def set_config_defaults(config):
-    # Force the user to set this. If we made it a default of 1, it might use a lot of disk space.
-    assert 'save_every_n_epochs' in config
-
+    # Provide a default value for save_every_n_epochs instead of asserting its presence
+    config.setdefault('save_every_n_epochs', 10)  # Default: save every 10 epochs
+    
     config.setdefault('pipeline_stages', 1)
     config.setdefault('activation_checkpointing', False)
     config.setdefault('warmup_steps', 0)
