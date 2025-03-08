@@ -708,7 +708,7 @@ if __name__ == '__main__':
         model_type = config['model']['type']
         if model_type == 'wan':
             from models.wan import WanPipeline
-            temp_model = WanPipeline(config['model'])
+            temp_model = WanPipeline(config)
         else:
             raise ValueError(f'Model type {model_type} is not supported for Set-and-Sequence training')
         
