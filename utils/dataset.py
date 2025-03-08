@@ -223,13 +223,20 @@ class ARBucketDataset:
 
 class DirectoryDataset:
     def __init__(self, directory_config, dataset_config, model_name, framerate=None, skip_dataset_validation=False):
-        self._set_defaults(directory_config, dataset_config)
         self.directory_config = directory_config
         self.dataset_config = dataset_config
-        if not skip_dataset_validation:
-            self.validate()
         self.model_name = model_name
         self.framerate = framerate
+        self.path = Path(directory_config['path'])
+        self.skip_dataset_validation = skip_dataset_validation
+        self._set_defaults(directory_config, dataset_config)
+        
+        # Set-and-Sequence: Add static_frames option with default False
+        self.static_frames = directory_config.get('static_frames', False)
+        
+        if not self.skip_dataset_validation:
+            self.validate()
+
         self.enable_ar_bucket = directory_config.get('enable_ar_bucket', dataset_config.get('enable_ar_bucket', False))
         # Configure directly from user-specified size buckets.
         self.size_buckets = directory_config.get('size_buckets', dataset_config.get('size_buckets', None))
@@ -242,7 +249,6 @@ class DirectoryDataset:
             self.resolutions = self._process_user_provided_resolutions(
                 directory_config.get('resolutions', dataset_config['resolutions'])
             )
-        self.path = Path(self.directory_config['path'])
         self.mask_path = Path(self.directory_config['mask_path']) if 'mask_path' in self.directory_config else None
         # For testing. Default if a mask is missing.
         self.default_mask_file = Path(self.directory_config['default_mask_file']) if 'default_mask_file' in self.directory_config else None
@@ -410,14 +416,27 @@ class DirectoryDataset:
                     height, width = first_frame.shape[:2]
                     assert self.framerate is not None, "Need model framerate but don't have it. This shouldn't happen. Is the framerate attribute on the model set?"
                     frames = int(self.framerate * meta['duration'])
+                    
+                    # Set-and-Sequence: If static_frames is True, treat videos as single frames
+                    # This is used in Stage 1 of Set-and-Sequence to learn identity basis
+                    if self.static_frames:
+                        # We'll still process it as a video, but we'll extract frames differently later
+                        is_video = True
+                    else:
+                        is_video = True
                 else:
                     pil_img = Image.open(image_file)
                     width, height = pil_img.size
                     frames = 1
+                    is_video = False
             except Exception:
                 logger.warning(f'Media file {image_file} could not be opened. Skipping.')
                 return empty_return
-            is_video = (frames > 1)
+            
+            # For non-static frames, use normal video processing
+            if not self.static_frames:
+                is_video = (frames > 1)
+            
             log_ar = np.log(width / height)
 
             if self.use_size_buckets:
@@ -439,7 +458,8 @@ class DirectoryDataset:
                 'caption': [caption],
                 'ar_bucket': [ar_bucket],
                 'size_bucket': [size_bucket],
-                'is_video': [is_video]
+                'is_video': [is_video],
+                'static_frames': [self.static_frames]  # Add static_frames flag to the dataset
             }
         return fn
 
@@ -660,9 +680,33 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         first_size_bucket = example['size_bucket'][0]
         tensors_and_masks = []
         te_idx = []
+        
+        # Get static_frames flag from the example
+        static_frames = example.get('static_frames', [False])[0]
+        
         for idx, path, mask_path, size_bucket in zip(indices, example['image_file'], example['mask_file'], example['size_bucket']):
             assert size_bucket == first_size_bucket
-            items = preprocess_media_file_fn(path, mask_path, size_bucket)
+            
+            # If static_frames is True, modify the preprocess_media_file_fn to extract unordered frames
+            if static_frames and Path(path).suffix in VIDEO_EXTENSIONS:
+                # Create a temporary config with video_clip_mode set to extract unordered frames
+                temp_config = preprocess_media_file_fn.config.copy() if hasattr(preprocess_media_file_fn, 'config') else {}
+                temp_config['video_clip_mode'] = 'static_frames'
+                
+                # Create a temporary preprocessor with the modified config
+                from models.base import PreprocessMediaFile
+                temp_preprocessor = PreprocessMediaFile(
+                    temp_config,
+                    support_video=preprocess_media_file_fn.support_video,
+                    framerate=preprocess_media_file_fn.framerate,
+                    round_height=preprocess_media_file_fn.round_height,
+                    round_width=preprocess_media_file_fn.round_width,
+                    round_frames=preprocess_media_file_fn.round_frames
+                )
+                items = temp_preprocessor(path, mask_path, size_bucket)
+            else:
+                items = preprocess_media_file_fn(path, mask_path, size_bucket)
+                
             tensors_and_masks.extend(items)
             te_idx.extend([idx] * len(items))
 
@@ -682,6 +726,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         # concatenate the list of tensors at each key into one batched tensor
         for k, v in results.items():
             results[k] = torch.cat(v)
+        
         results['te_idx'] = te_idx
         results['mask'] = [t[1] for t in tensors_and_masks]
         return results

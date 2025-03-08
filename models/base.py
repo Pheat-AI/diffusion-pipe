@@ -38,6 +38,17 @@ def extract_clips(video, target_frames, video_clip_mode):
         num_clips = ((frames - 1) // target_frames) + 1
         start_indices = torch.linspace(0, frames-target_frames, num_clips).int()
         return [video[:, i:i+target_frames, ...] for i in start_indices]
+    elif video_clip_mode == 'static_frames':
+        # Set-and-Sequence: Extract evenly spaced frames from the video
+        # This is used in Stage 1 to learn identity basis from unordered frames
+        if frames <= target_frames:
+            # If we have fewer frames than target, just use all frames
+            return [video]
+        else:
+            # Extract evenly spaced frames
+            indices = torch.linspace(0, frames-1, target_frames).long()
+            selected_frames = video[:, indices, ...]
+            return [selected_frames]
     else:
         raise NotImplementedError(f'video_clip_mode={video_clip_mode} is not recognized')
 

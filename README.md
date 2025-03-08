@@ -13,8 +13,11 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - Efficient multi-process, multi-GPU pre-caching of latents and text embeddings
 - Seemlessly supports both image and video models in a unified way
 - Easily add new models by implementing a single subclass
+- Set-and-Sequence implementation for dynamic concepts personalization from single videos
 
 ## Recent changes
+- 2025-03-08
+  - Added Set-and-Sequence implementation for dynamic concepts personalization from single videos. This two-stage approach captures both appearance and motion from a single video. See `examples/SET_AND_SEQUENCE_README.md` for details.
 - 2025-03-03
   - Added masked training support. See the comment in the example dataset config for explanation. This feature required some refactoring, I tested that each supported model is able to train, but if something suddenly breaks for you this change is the likely cause. Like most brand-new features, masked training is experimental.
   - Added Wan i2v training. It seems to work but is barely tested. See the supported models doc for details.

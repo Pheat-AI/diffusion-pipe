@@ -1,0 +1,40 @@
+# Set-and-Sequence dataset configuration
+# This configuration is used for both Stage 1 and Stage 2
+# The static_frames option will be set by the training script based on the stage
+
+# Resolution settings
+resolutions = [512]  # Training resolution
+enable_ar_bucket = false
+min_ar = 0.5
+max_ar = 2.0
+num_ar_buckets = 7
+
+# Frame settings
+# For Stage 1 (Identity Basis), we need enough frames to capture appearance variations
+# For Stage 2 (Motion Residual), we need enough frames to capture motion dynamics
+# The frame_buckets setting defines the possible frame lengths for videos
+# [1, 17, 33, 49, 65, 81] means videos can have 1, 17, 33, 49, 65, or 81 frames
+# For Set-and-Sequence, it's recommended to use at least 17-33 frames
+frame_buckets = [1, 17, 33, 49, 65, 81]
+
+# Directory configuration
+[[directory]]
+path = "/root/data"
+num_repeats = 10  # Repeat the dataset for more training iterations
+caption_prefix = ""  # Optional prefix for all captions
+shuffle_tags = false  # Whether to shuffle comma-separated tags in captions
+
+# For Stage 1 (Identity Basis), the training script will set:
+# static_frames = true
+# This will extract evenly spaced frames from videos for appearance learning
+# These frames are treated as an unordered set to learn the identity basis
+
+# For Stage 2 (Motion Residual), the training script will set:
+# static_frames = false
+# This will use sequential frames from videos for motion learning
+# The video_clip_mode in the main config determines how video clips are extracted
+# For Set-and-Sequence, "single_middle" is recommended for Stage 2
+
+# Example captions for a video of a person dancing:
+# Stage 1: "A [v] person wearing a red shirt and black pants"
+# Stage 2: "A [v] person wearing a red shirt and black pants performing [u] dance movements" 

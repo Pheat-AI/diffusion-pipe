@@ -1,0 +1,103 @@
+# Set-and-Sequence configuration for dynamic concepts personalization
+# Based on the paper "Dynamic Concepts Personalization from Single Videos"
+# https://snap-research.github.io/dynamic_concepts
+
+# Output directory for saving models and checkpoints
+output_dir = "/path/to/output"
+
+# Path to dataset configuration
+dataset = "/path/to/dataset.toml"
+
+# Training parameters
+# This is the default number of epochs if stage-specific epochs are not set
+epochs = 600
+
+# Stage-specific epoch counts (used when running both stages sequentially)
+# Stage 1 (Identity Basis): Recommended 600-800 epochs
+# Stage 2 (Motion Residual): Recommended 900-1200 epochs for simple motions, up to 2500 for complex motions
+# These can be overridden with --stage1_epochs and --stage2_epochs command-line arguments
+[set_and_sequence]
+stage1_epochs = 600  # Epochs for Stage 1 (Identity Basis)
+stage2_epochs = 900  # Epochs for Stage 2 (Motion Residual)
+
+# Other training parameters
+micro_batch_size_per_gpu = 1
+pipeline_stages = 1
+gradient_accumulation_steps = 4
+gradient_clipping = 1.0
+warmup_steps = 100
+
+# Evaluation settings
+eval_every_n_epochs = 10
+eval_before_first_step = true
+eval_micro_batch_size_per_gpu = 1
+eval_gradient_accumulation_steps = 1
+enable_tensorboard = true
+
+# Checkpoint settings
+save_every_n_epochs = 10
+checkpoint_every_n_minutes = 60
+activation_checkpointing = true
+partition_method = "parameters"
+save_dtype = "bfloat16"
+
+# Miscellaneous settings
+caching_batch_size = 1
+steps_per_print = 1
+# video_clip_mode is used for Stage 2 (Motion Residual)
+# "single_middle" extracts a single clip from the middle of the video
+# Stage 1 will automatically use "static_frames" mode regardless of this setting
+video_clip_mode = "single_middle"
+
+# Set-and-Sequence specific settings
+# Dropout probabilities for regularization
+# High dropout for Stage 1 prevents overfitting to specific frames
+# Lower dropout for Stage 2 allows better motion learning
+stage1_dropout = 0.8  # High dropout for Stage 1 (Identity Basis)
+stage2_dropout = 0.5  # Lower dropout for Stage 2 (Motion Residual)
+
+# Text token masking probability for regularization
+# Randomly masks tokens in the text prompt to improve robustness
+text_token_mask_prob = 0.1
+
+# Self-conditioning probability
+# Uses model's own predictions as additional conditioning
+self_conditioning_prob = 0.9
+
+# Prior preservation settings
+# Helps maintain the base model's capabilities
+prior_preservation = true
+prior_preservation_weight = 1.0
+
+# Model configuration
+[model]
+type = "wan"  # Only Wan model is supported for now
+ckpt_path = "/path/to/wan2.1-t2v-14b"
+dtype = "bfloat16"
+transformer_dtype = "float8"  # Optional: Use fp8 for transformer when training LoRA
+timestep_sample_method = "logit_normal"
+
+# LoRA adapter configuration
+[adapter]
+type = "lora"
+rank = 32  # Higher rank for better capacity to capture both appearance and motion
+dtype = "bfloat16"
+dropout = 0.0  # We handle dropout separately in the Set-and-Sequence implementation
+
+# Optimizer configuration
+[optimizer]
+type = "adamw_optimi"
+lr = 2e-5
+betas = [0.9, 0.99]
+weight_decay = 0.01
+eps = 1e-8
+
+# Usage:
+# Run both stages sequentially (recommended):
+#   python train_set_and_sequence.py --config /path/to/this/config.toml --run_both_stages
+#
+# Stage 1 (Identity Basis) only:
+#   python train_set_and_sequence.py --config /path/to/this/config.toml --stage 1
+#
+# Stage 2 (Motion Residual) only:
+#   python train_set_and_sequence.py --config /path/to/this/config.toml --stage 2 --identity_basis_path /path/to/stage1/output/run/identity_basis 
