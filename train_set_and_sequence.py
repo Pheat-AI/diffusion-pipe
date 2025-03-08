@@ -580,8 +580,26 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     # Wait for all processes
     dist.barrier()
     
+    # For Stage 1, modify dataset config to use static frames
+    dataset_config = toml.load(config['dataset'])
+    for directory in dataset_config.get('directory', []):
+        directory['static_frames'] = True
+    
+    # Create dataset manager and dataset for Stage 1
+    caching_batch_size = config.get('caching_batch_size', 1)
+    stage1_dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=args.regenerate_cache, caching_batch_size=caching_batch_size)
+    stage1_dataset = dataset_util.Dataset(dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
+    stage1_dataset_manager.register(stage1_dataset)
+    
+    # Register eval datasets
+    for name, eval_data in eval_data_map.items():
+        stage1_dataset_manager.register(eval_data)
+    
+    # Cache datasets
+    stage1_dataset_manager.cache()
+    
     # Run Stage 1
-    train_stage1_identity_basis(model, config, train_data, eval_data_map, stage1_dir, resume_from_checkpoint)
+    train_stage1_identity_basis(model, config, stage1_dataset, eval_data_map, stage1_dir, resume_from_checkpoint)
     
     # Path to the Identity Basis LoRA
     identity_basis_path = os.path.join(stage1_dir, "identity_basis")
@@ -620,12 +638,29 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     # Wait for all processes
     dist.barrier()
     
+    # For Stage 2, modify dataset config to use full video sequences
+    dataset_config = toml.load(config['dataset'])
+    for directory in dataset_config.get('directory', []):
+        directory['static_frames'] = False
+    
+    # Create dataset manager and dataset for Stage 2
+    stage2_dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=args.regenerate_cache, caching_batch_size=caching_batch_size)
+    stage2_dataset = dataset_util.Dataset(dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
+    stage2_dataset_manager.register(stage2_dataset)
+    
+    # Register eval datasets
+    for name, eval_data in eval_data_map.items():
+        stage2_dataset_manager.register(eval_data)
+    
+    # Cache datasets
+    stage2_dataset_manager.cache()
+    
     # Run Stage 2
     if is_main_process():
         print(f"Starting Stage 2 with {config['epochs']} epochs")
         print(f"Using Identity Basis from: {identity_basis_path}")
     
-    train_stage2_motion_residual(model, config, train_data, eval_data_map, stage2_dir, False, identity_basis_path)
+    train_stage2_motion_residual(model, config, stage2_dataset, eval_data_map, stage2_dir, False, identity_basis_path)
     
     # Create a symbolic link to the final combined LoRA in the run directory
     if is_main_process():
@@ -714,29 +749,30 @@ if __name__ == '__main__':
         
         temp_model.model_specific_dataset_config_validation(dataset_config)
     
+    # Create dataset manager
+    caching_batch_size = config.get('caching_batch_size', 1)
+    dataset_manager = dataset_util.DatasetManager(temp_model, regenerate_cache=args.regenerate_cache, caching_batch_size=caching_batch_size)
+    
     # Create dataset
-    train_data = dataset_util.create_dataset(
-        dataset_config,
-        temp_model.get_preprocess_media_file_fn(),
-        temp_model.get_call_vae_fn(temp_model.get_vae()),
-        temp_model.get_call_text_encoder_fn(temp_model.get_text_encoders()),
-        temp_model.prepare_inputs,
-        regenerate_cache=args.regenerate_cache,
-    )
+    train_data = dataset_util.Dataset(dataset_config, temp_model, skip_dataset_validation=args.i_know_what_i_am_doing)
+    dataset_manager.register(train_data)
     
     # Create evaluation datasets
     eval_data_map = {}
-    for eval_dataset_path in config['eval_datasets']:
-        eval_dataset_config = toml.load(eval_dataset_path)
-        eval_data = dataset_util.create_dataset(
-            eval_dataset_config,
-            temp_model.get_preprocess_media_file_fn(),
-            temp_model.get_call_vae_fn(temp_model.get_vae()),
-            temp_model.get_call_text_encoder_fn(temp_model.get_text_encoders()),
-            temp_model.prepare_inputs,
-            regenerate_cache=args.regenerate_cache,
-        )
-        eval_data_map[os.path.basename(eval_dataset_path)] = eval_data
+    for i, eval_dataset in enumerate(config['eval_datasets']):
+        if type(eval_dataset) == str:
+            name = f'eval{i}'
+            config_path = eval_dataset
+        else:
+            name = eval_dataset['name']
+            config_path = eval_dataset['config']
+        with open(config_path) as f:
+            eval_dataset_config = toml.load(f)
+        eval_data_map[name] = dataset_util.Dataset(eval_dataset_config, temp_model, skip_dataset_validation=args.i_know_what_i_am_doing)
+        dataset_manager.register(eval_data_map[name])
+    
+    # Cache datasets
+    dataset_manager.cache()
     
     # Exit if only caching
     if args.cache_only:
