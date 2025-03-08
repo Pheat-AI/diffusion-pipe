@@ -125,13 +125,22 @@ def get_most_recent_run_dir(output_dir):
 def print_model_info(model):
     if not is_main_process():
         return
+    
     print(f'Model type: {model.name}')
+    
+    # Check if diffusion model is loaded
+    if not hasattr(model, 'diffusion_model') or model.diffusion_model is None:
+        print("Diffusion model not loaded yet. Load the model before printing detailed parameters.")
+        return
+        
+    # Now it's safe to access transformer
     total_params = 0
     trainable_params = 0
     for name, p in model.transformer.named_parameters():
         total_params += p.numel()
         if p.requires_grad:
             trainable_params += p.numel()
+    
     print(f'Total parameters: {total_params:,}')
     print(f'Trainable parameters: {trainable_params:,}')
     print(f'Percentage of trainable parameters: {trainable_params / total_params * 100:.2f}%')
@@ -535,7 +544,7 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     if is_main_process():
         print("Running both Stage 1 and Stage 2 sequentially")
     
-    # Create model
+    # Load model
     model_type = config['model']['type']
     if model_type == 'wan':
         from models.wan import WanPipeline
@@ -543,17 +552,21 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     else:
         raise ValueError(f'Model type {model_type} is not supported for Set-and-Sequence training')
     
-    # Print model info
-    print_model_info(model)
-    
+    # Print basic model info before loading diffusion model
+    if is_main_process():
+        print(f'Model type: {model.name}')
+
     # Load diffusion model
     model.load_diffusion_model()
-    
+
     # Configure adapter
     if adapter_config := config.get('adapter', None):
         model.configure_adapter(adapter_config)
     else:
         raise ValueError('Set-and-Sequence requires a LoRA adapter configuration')
+
+    # Now print detailed model info
+    print_model_info(model)
     
     # Override epochs for Stage 1 if specified
     original_epochs = config['epochs']
@@ -728,7 +741,20 @@ if __name__ == '__main__':
     else:
         raise ValueError(f'Model type {model_type} is not supported for Set-and-Sequence training')
     
-    # Print model info
+    # Print basic model info before loading diffusion model
+    if is_main_process():
+        print(f'Model type: {model.name}')
+
+    # Load diffusion model
+    model.load_diffusion_model()
+
+    # Configure adapter
+    if adapter_config := config.get('adapter', None):
+        model.configure_adapter(adapter_config)
+    else:
+        raise ValueError('Set-and-Sequence requires a LoRA adapter configuration')
+
+    # Now print detailed model info
     print_model_info(model)
     
     # Load dataset
