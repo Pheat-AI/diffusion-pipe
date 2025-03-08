@@ -698,10 +698,6 @@ if __name__ == '__main__':
     # Set device for distributed training
     torch.cuda.set_device(dist.get_rank())
     
-    # Check if this is a Set-and-Sequence training run
-    if not args.run_both_stages and args.stage not in [1, 2]:
-        raise ValueError(f'Invalid stage {args.stage}. Must be 1 (Identity Basis) or 2 (Motion Residual)')
-    
     # Create output directory
     output_dir = config.get('output_dir', 'output')
     if is_main_process():
