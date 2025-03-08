@@ -40,9 +40,6 @@ parser.add_argument('--resume_from_checkpoint', nargs='?', const=True, default=N
 parser.add_argument('--regenerate_cache', action='store_true', default=None, help='Force regenerate cache. Useful if none of the files have changed but their contents have, e.g. modified captions.')
 parser.add_argument('--cache_only', action='store_true', default=None, help='Cache model inputs then exit.')
 parser.add_argument('--i_know_what_i_am_doing', action='store_true', default=None, help="Skip certain checks and overrides. You may end up using settings that won't work.")
-parser.add_argument('--stage', type=int, default=1, help="Set-and-Sequence stage (1 for Identity Basis, 2 for Motion Residual)")
-parser.add_argument('--identity_basis_path', type=str, default=None, help="Path to the Identity Basis LoRA from Stage 1 (required for Stage 2)")
-parser.add_argument('--run_both_stages', action='store_true', help="Run both Stage 1 and Stage 2 sequentially")
 parser.add_argument('--stage1_epochs', type=int, default=None, help="Number of epochs for Stage 1 (overrides config)")
 parser.add_argument('--stage2_epochs', type=int, default=None, help="Number of epochs for Stage 2 (overrides config)")
 parser = deepspeed.add_config_arguments(parser)
@@ -686,75 +683,70 @@ if __name__ == '__main__':
     # Apply patches
     apply_patches()
     
-    # Load configuration
+    # Load config
+    if args.config is None:
+        raise ValueError('--config is required')
+    
     if not os.path.exists(args.config):
         raise ValueError(f'Config file {args.config} does not exist')
+    
     config = toml.load(args.config)
     set_config_defaults(config)
+    
+    # Initialize DeepSpeed before caching
+    deepspeed.init_distributed()
+    # Set device for distributed training
+    torch.cuda.set_device(dist.get_rank())
     
     # Check if this is a Set-and-Sequence training run
     if not args.run_both_stages and args.stage not in [1, 2]:
         raise ValueError(f'Invalid stage {args.stage}. Must be 1 (Identity Basis) or 2 (Motion Residual)')
     
-    # For Stage 2, identity_basis_path is required
-    if not args.run_both_stages and args.stage == 2 and args.identity_basis_path is None:
-        raise ValueError('For Stage 2, --identity_basis_path must be provided')
+    # Create output directory
+    output_dir = config.get('output_dir', 'output')
+    if is_main_process():
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # Create run directory
+    run_dir = None
+    if is_main_process():
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        run_dir = os.path.join(output_dir, timestamp)
+        os.makedirs(run_dir, exist_ok=True)
+        
+        # Save config
+        with open(os.path.join(run_dir, 'config.toml'), 'w') as f:
+            toml.dump(config, f)
+    
+    # Broadcast run_dir to all processes
+    if dist.get_world_size() > 1:
+        run_dir_list = [run_dir]
+        torch.distributed.broadcast_object_list(run_dir_list, src=0)
+        run_dir = run_dir_list[0]
     
     # Load model
-    if not args.run_both_stages:
-        model_type = config['model']['type']
-        if model_type == 'wan':
-            from models.wan import WanPipeline
-            model = WanPipeline(config['model'])
-        else:
-            raise ValueError(f'Model type {model_type} is not supported for Set-and-Sequence training')
-        
-        # Print model info
-        print_model_info(model)
+    model_type = config['model']['type']
+    if model_type == 'wan':
+        from models.wan import WanPipeline
+        model = WanPipeline(config)
+    else:
+        raise ValueError(f'Model type {model_type} is not supported for Set-and-Sequence training')
+    
+    # Print model info
+    print_model_info(model)
     
     # Load dataset
     dataset_config = toml.load(config['dataset'])
     
-    # If not running both stages, we need to modify the dataset config based on the stage
-    if not args.run_both_stages:
-        # For model-specific validation
-        model_type = config['model']['type']
-        if model_type == 'wan':
-            from models.wan import WanPipeline
-            temp_model = WanPipeline(config['model'])
-        else:
-            raise ValueError(f'Model type {model_type} is not supported for Set-and-Sequence training')
-        
-        temp_model.model_specific_dataset_config_validation(dataset_config)
-        
-        # For Stage 1, use static frames (unordered set of frames)
-        if args.stage == 1:
-            # Modify dataset config to use static frames
-            for directory in dataset_config.get('directory', []):
-                directory['static_frames'] = True
-        
-        # For Stage 2, use full video sequence
-        if args.stage == 2:
-            # Ensure we're using full video sequences
-            for directory in dataset_config.get('directory', []):
-                directory['static_frames'] = False
-    else:
-        # For model-specific validation when running both stages
-        model_type = config['model']['type']
-        if model_type == 'wan':
-            from models.wan import WanPipeline
-            temp_model = WanPipeline(config)
-        else:
-            raise ValueError(f'Model type {model_type} is not supported for Set-and-Sequence training')
-        
-        temp_model.model_specific_dataset_config_validation(dataset_config)
+    # For model-specific validation
+    model.model_specific_dataset_config_validation(dataset_config)
     
     # Create dataset manager
     caching_batch_size = config.get('caching_batch_size', 1)
-    dataset_manager = dataset_util.DatasetManager(temp_model, regenerate_cache=args.regenerate_cache, caching_batch_size=caching_batch_size)
+    dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=args.regenerate_cache, caching_batch_size=caching_batch_size)
     
     # Create dataset
-    train_data = dataset_util.Dataset(dataset_config, temp_model, skip_dataset_validation=args.i_know_what_i_am_doing)
+    train_data = dataset_util.Dataset(dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
     dataset_manager.register(train_data)
     
     # Create evaluation datasets
@@ -768,7 +760,7 @@ if __name__ == '__main__':
             config_path = eval_dataset['config']
         with open(config_path) as f:
             eval_dataset_config = toml.load(f)
-        eval_data_map[name] = dataset_util.Dataset(eval_dataset_config, temp_model, skip_dataset_validation=args.i_know_what_i_am_doing)
+        eval_data_map[name] = dataset_util.Dataset(eval_dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
         dataset_manager.register(eval_data_map[name])
     
     # Cache datasets
@@ -778,39 +770,5 @@ if __name__ == '__main__':
     if args.cache_only:
         quit()
     
-    # Create or get run directory
-    if not args.resume_from_checkpoint and is_main_process():
-        run_dir = os.path.join(config['output_dir'], "run")
-        os.makedirs(run_dir, exist_ok=True)
-        shutil.copy(args.config, run_dir)
-    
-    # Wait for all processes then get the most recent dir
-    dist.barrier()
-    if args.resume_from_checkpoint is True:  # No specific folder provided, use most recent
-        run_dir = get_most_recent_run_dir(config['output_dir'])
-    elif isinstance(args.resume_from_checkpoint, str):  # Specific folder provided
-        run_dir = os.path.join(config['output_dir'], args.resume_from_checkpoint)
-        if not os.path.exists(run_dir):
-            raise ValueError(f"Checkpoint directory {run_dir} does not exist")
-    else:  # Not resuming, use most recent (newly created) dir
-        run_dir = get_most_recent_run_dir(config['output_dir'])
-    
-    # Run both stages or just one stage based on the argument
-    if args.run_both_stages:
-        run_both_stages(config, train_data, eval_data_map, run_dir, args.resume_from_checkpoint)
-    else:
-        # If not running both stages, we need to load the diffusion model
-        if not args.run_both_stages:
-            model.load_diffusion_model()
-            
-            # Configure adapter
-            if adapter_config := config.get('adapter', None):
-                model.configure_adapter(adapter_config)
-            else:
-                raise ValueError('Set-and-Sequence requires a LoRA adapter configuration')
-        
-        # Start training based on stage
-        if args.stage == 1:
-            train_stage1_identity_basis(model, config, train_data, eval_data_map, run_dir, args.resume_from_checkpoint)
-        else:  # Stage 2
-            train_stage2_motion_residual(model, config, train_data, eval_data_map, run_dir, args.resume_from_checkpoint, args.identity_basis_path) 
+    # Run both stages sequentially
+    run_both_stages(config, train_data, eval_data_map, run_dir, args.resume_from_checkpoint) 
