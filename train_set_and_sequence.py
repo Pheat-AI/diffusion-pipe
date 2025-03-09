@@ -419,8 +419,13 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
     layers = model.to_layers()
     additional_pipeline_module_kwargs = {}
     if config['activation_checkpointing']:
+        # FIX: Create a wrapped checkpoint function that properly handles the arguments
+        def wrapped_checkpoint(*args, **kwargs):
+            with isolate_rng():
+                return torch.utils.checkpoint.checkpoint(*args, **kwargs)
+        
         additional_pipeline_module_kwargs['activation_checkpoint_interval'] = 1
-        additional_pipeline_module_kwargs['activation_checkpoint_func'] = isolate_rng(torch.utils.checkpoint.checkpoint)
+        additional_pipeline_module_kwargs['activation_checkpoint_func'] = wrapped_checkpoint
     
     # Create pipeline model
     pipeline_model = deepspeed.pipe.PipelineModule(
