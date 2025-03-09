@@ -427,12 +427,12 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
         additional_pipeline_module_kwargs['activation_checkpoint_interval'] = 1
         additional_pipeline_module_kwargs['activation_checkpoint_func'] = wrapped_checkpoint
     
-    # Create pipeline model
+    # Create pipeline model with proper loss function
     pipeline_model = deepspeed.pipe.PipelineModule(
         layers=layers,
         num_stages=config['pipeline_stages'],
         partition_method=config.get('partition_method', 'parameters'),
-        loss_fn=lambda x, y: x,
+        loss_fn=model.get_loss_fn(),  # Use the model's loss function
         **additional_pipeline_module_kwargs
     )
     
