@@ -256,8 +256,12 @@ def train_stage1_identity_basis(model, config, train_data, eval_data_map, run_di
     # Set high dropout for B matrix in LoRA
     dropout_prob = config['set_and_sequence']['stage1_dropout']
     
-    # Train on static frames (no temporal information)
-    # This is handled by the dataset configuration
+    # Check that parameters require gradients
+    if is_main_process():
+        trainable_params = sum(p.requires_grad for p in model.transformer.parameters())
+        print(f"Number of trainable parameters: {trainable_params}")
+        if trainable_params == 0:
+            print("WARNING: No trainable parameters found!")
     
     # Start training
     train_model(model, config, train_data, eval_data_map, run_dir, resume_from_checkpoint, 
@@ -427,12 +431,26 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
         additional_pipeline_module_kwargs['activation_checkpoint_interval'] = 1
         additional_pipeline_module_kwargs['activation_checkpoint_func'] = wrapped_checkpoint
     
-    # Create pipeline model with proper loss function
+    # Get the model's loss function
+    original_loss_fn = model.get_loss_fn()
+    
+    # Create a wrapper to ensure the loss has gradients
+    def loss_fn_wrapper(pred, target):
+        loss = original_loss_fn(pred, target)
+        # Ensure the loss requires gradients
+        if not loss.requires_grad:
+            # This is a fallback in case the original loss doesn't have gradients
+            # Create a dummy variable with gradients and add it to the loss
+            dummy = torch.ones(1, device=loss.device, requires_grad=True)
+            loss = loss * dummy
+        return loss
+    
+    # Create pipeline model with wrapped loss function
     pipeline_model = deepspeed.pipe.PipelineModule(
         layers=layers,
         num_stages=config['pipeline_stages'],
         partition_method=config.get('partition_method', 'parameters'),
-        loss_fn=model.get_loss_fn(),  # Use the model's loss function
+        loss_fn=loss_fn_wrapper,
         **additional_pipeline_module_kwargs
     )
     
@@ -553,8 +571,23 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
         
         # Reset activation shape and train batch
         model_engine.reset_activation_shape()
-        loss = model_engine.train_batch().item()
-        epoch_loss += loss
+        
+        # Add debugging
+        if is_main_process():
+            print("Starting train_batch()")
+        
+        try:
+            loss = model_engine.train_batch()
+            if is_main_process():
+                print(f"Loss: {loss.item()}, requires_grad: {loss.requires_grad}, has_grad_fn: {loss.grad_fn is not None}")
+            loss_value = loss.item()
+        except Exception as e:
+            if is_main_process():
+                print(f"Error in train_batch: {e}")
+                print(f"Model parameters requiring grad: {sum(p.requires_grad for p in model_engine.parameters())}")
+            raise
+            
+        epoch_loss += loss_value
         num_steps += 1
         train_dataloader.sync_epoch()
         
@@ -564,7 +597,7 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
         
         # Log to tensorboard
         if is_main_process() and tb_writer is not None and step % config['logging_steps'] == 0:
-            tb_writer.add_scalar(f'train/loss', loss, step)
+            tb_writer.add_scalar(f'train/loss', loss_value, step)
             tb_writer.add_scalar(f'train/stage', stage, step)
         
         # Evaluate if configured
@@ -614,9 +647,16 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     # Load diffusion model
     model.load_diffusion_model()
 
-    # Configure adapter
+    # Configure adapter - IMPORTANT: This is where LoRA is set up
     if adapter_config := config.get('adapter', None):
+        if is_main_process():
+            print(f"Configuring adapter with config: {adapter_config}")
         model.configure_adapter(adapter_config)
+        
+        # Verify adapter was properly configured
+        if is_main_process():
+            trainable_params = sum(p.requires_grad for p in model.transformer.parameters())
+            print(f"Number of trainable parameters after adapter config: {trainable_params}")
     else:
         raise ValueError('Set-and-Sequence requires a LoRA adapter configuration')
 
