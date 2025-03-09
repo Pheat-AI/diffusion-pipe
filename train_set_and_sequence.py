@@ -333,7 +333,8 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
     
     # Configure optimizer
     optimizer_config = config['optimizer']
-    optimizer_type = optimizer_config['type']
+    optimizer_type = optimizer_config['type'].lower()
+    
     if optimizer_type == 'adamw':
         optimizer = torch.optim.AdamW(
             parameters,
@@ -343,26 +344,56 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
             eps=optimizer_config['eps'],
         )
     elif optimizer_type == 'adamw_optimi':
-        from optimizers.adamw_optimi import AdamW
-        optimizer = AdamW(
-            parameters,
-            lr=optimizer_config['lr'],
-            betas=optimizer_config['betas'],
-            weight_decay=optimizer_config['weight_decay'],
-            eps=optimizer_config['eps'],
-        )
+        try:
+            import optimi
+            optimizer = optimi.AdamW(
+                parameters,
+                lr=optimizer_config['lr'],
+                betas=optimizer_config['betas'],
+                weight_decay=optimizer_config['weight_decay'],
+                eps=optimizer_config['eps'],
+            )
+        except ImportError:
+            if is_main_process():
+                print("optimi package not found. Falling back to standard AdamW.")
+            optimizer = torch.optim.AdamW(
+                parameters,
+                lr=optimizer_config['lr'],
+                betas=optimizer_config['betas'],
+                weight_decay=optimizer_config['weight_decay'],
+                eps=optimizer_config['eps'],
+            )
     elif optimizer_type == 'adamw8bitkahan':
-        from optimizers.adamw_8bit_kahan import AdamW8bitKahan
-        optimizer = AdamW8bitKahan(
+        try:
+            from optimizers.adamw_8bit_kahan import AdamW8bitKahan
+            optimizer = AdamW8bitKahan(
+                parameters,
+                lr=optimizer_config['lr'],
+                betas=optimizer_config['betas'],
+                weight_decay=optimizer_config['weight_decay'],
+                eps=optimizer_config['eps'],
+                gradient_release=optimizer_config.get('gradient_release', False),
+            )
+        except ImportError:
+            if is_main_process():
+                print("AdamW8bitKahan not found. Falling back to standard AdamW.")
+            optimizer = torch.optim.AdamW(
+                parameters,
+                lr=optimizer_config['lr'],
+                betas=optimizer_config['betas'],
+                weight_decay=optimizer_config['weight_decay'],
+                eps=optimizer_config['eps'],
+            )
+    else:
+        if is_main_process():
+            print(f"Optimizer type {optimizer_type} not specifically implemented. Falling back to standard AdamW.")
+        optimizer = torch.optim.AdamW(
             parameters,
             lr=optimizer_config['lr'],
-            betas=optimizer_config['betas'],
-            weight_decay=optimizer_config['weight_decay'],
-            eps=optimizer_config['eps'],
-            gradient_release=optimizer_config.get('gradient_release', False),
+            betas=optimizer_config.get('betas', (0.9, 0.999)),
+            weight_decay=optimizer_config.get('weight_decay', 0.01),
+            eps=optimizer_config.get('eps', 1e-8),
         )
-    else:
-        raise NotImplementedError(f'Optimizer type {optimizer_type} is not implemented')
 
     # Configure learning rate scheduler
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
