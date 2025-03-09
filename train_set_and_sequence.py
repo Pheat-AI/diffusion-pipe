@@ -190,32 +190,33 @@ def evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accu
 
 
 def apply_dropout_to_lora_b(model, dropout_prob):
-    """Apply dropout to the B matrix in LoRA layers"""
-    for name, module in model.named_modules():
-        if hasattr(module, 'lora_B'):
-            # Check if lora_B is a ModuleDict (contains multiple layers)
-            if isinstance(module.lora_B, nn.ModuleDict):
-                # Apply dropout to each layer in the ModuleDict
-                for layer_name, layer in module.lora_B.items():
-                    # Create a binary mask with dropout probability
-                    mask = torch.bernoulli(torch.ones_like(layer) * (1 - dropout_prob))
-                    # Apply the mask to the layer
-                    layer.data = layer.data * mask.to(layer.device)
-            # If lora_B is a tensor
-            elif isinstance(module.lora_B, torch.Tensor):
-                # Create a binary mask with dropout probability
-                mask = torch.bernoulli(torch.ones_like(module.lora_B) * (1 - dropout_prob))
-                # Apply the mask to lora_B
-                module.lora_B.data = module.lora_B.data * mask.to(module.lora_B.device)
-            # If lora_B is a Parameter
-            elif isinstance(module.lora_B, nn.Parameter):
-                # Create a binary mask with dropout probability
-                mask = torch.bernoulli(torch.ones_like(module.lora_B.data) * (1 - dropout_prob))
-                # Apply the mask to lora_B
-                module.lora_B.data = module.lora_B.data * mask.to(module.lora_B.device)
-            else:
-                if is_main_process():
-                    print(f"Warning: lora_B is of type {type(module.lora_B)}, which is not supported for dropout. Skipping.")
+    """Apply dropout to LoRA B matrices in a DeepSpeed PipelineModule"""
+    # For DeepSpeed PipelineModule
+    if hasattr(model, 'forward_funcs'):
+        # Iterate through the layers in the pipeline
+        for layer_idx, layer in enumerate(model.forward_funcs):
+            # Check if the layer has modules
+            if hasattr(layer, 'module'):
+                # Apply dropout to all modules in the layer
+                for name, module in layer.module.named_modules():
+                    if hasattr(module, 'lora_dropout'):
+                        # Apply dropout to LoRA B matrices
+                        if dropout_prob > 0:
+                            module.lora_dropout.p = dropout_prob
+                        else:
+                            module.lora_dropout.p = 0.0
+    # For regular PyTorch modules
+    elif hasattr(model, 'named_modules'):
+        for name, module in model.named_modules():
+            if hasattr(module, 'lora_dropout'):
+                # Apply dropout to LoRA B matrices
+                if dropout_prob > 0:
+                    module.lora_dropout.p = dropout_prob
+                else:
+                    module.lora_dropout.p = 0.0
+    else:
+        if is_main_process():
+            print(f"Warning: Model of type {type(model)} does not support LoRA dropout. Skipping.")
 
 
 def mask_text_tokens(text_tokens, mask_prob):
@@ -536,8 +537,7 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
     # Main training loop
     while True:
         # Apply dropout to LoRA B matrices
-        if dropout_prob > 0:
-            apply_dropout_to_lora_b(model_engine, dropout_prob)
+        apply_dropout_to_lora_b(model_engine, dropout_prob)
         
         # Apply text token masking if configured
         if text_token_mask_prob > 0 and hasattr(train_dataloader, 'current_batch') and 'text_tokens' in train_dataloader.current_batch:
