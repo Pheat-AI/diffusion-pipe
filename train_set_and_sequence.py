@@ -549,7 +549,7 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     model_type = config['model']['type']
     if model_type == 'wan':
         from models.wan import WanPipeline
-        model = WanPipeline(config['model'])
+        model = WanPipeline(config)
     else:
         raise ValueError(f'Model type {model_type} is not supported for Set-and-Sequence training')
     
