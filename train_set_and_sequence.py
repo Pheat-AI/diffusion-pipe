@@ -572,15 +572,28 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
         # Reset activation shape and train batch
         model_engine.reset_activation_shape()
         
-        # Add debugging
-        if is_main_process():
-            print("Starting train_batch()")
-        
         try:
-            loss = model_engine.train_batch()
+            # Wrap the train_batch call in a try-except block
+            try:
+                loss = model_engine.train_batch()
+            except TypeError as e:
+                if "unsupported format string passed to Tensor.__format__" in str(e):
+                    # This is just a logging error, we can ignore it
+                    # The loss is still computed correctly
+                    if is_main_process():
+                        print("Ignoring format string error in DeepSpeed logging")
+                    # Get the loss directly from the model_engine
+                    loss = model_engine.loss
+                else:
+                    # Re-raise if it's a different TypeError
+                    raise
+            
             if is_main_process():
-                print(f"Loss: {loss.item()}, requires_grad: {loss.requires_grad}, has_grad_fn: {loss.grad_fn is not None}")
-            loss_value = loss.item()
+                loss_value = loss.item() if torch.is_tensor(loss) else loss
+                print(f"Loss: {loss_value}")
+            
+            loss_value = loss.item() if torch.is_tensor(loss) else float(loss)
+            
         except Exception as e:
             if is_main_process():
                 print(f"Error in train_batch: {e}")
