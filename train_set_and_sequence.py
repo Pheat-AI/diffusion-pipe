@@ -395,12 +395,6 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
             eps=optimizer_config.get('eps', 1e-8),
         )
 
-    # Configure learning rate scheduler
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=len(train_data) // config['gradient_accumulation_steps'] * config['epochs'],
-    )
-
     # Configure DeepSpeed
     layers = model.to_layers()
     additional_pipeline_module_kwargs = {}
@@ -433,20 +427,12 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
     }
     
     # Initialize DeepSpeed engine
-    model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
+    model_engine, optimizer, _, _ = deepspeed.initialize(
         args=args,
         model=pipeline_model,
         optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
         config=ds_config
     )
-    
-    # Apply warmup scheduler if configured
-    if config['warmup_steps'] > 0:
-        warmup_steps = config['warmup_steps']
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1/warmup_steps, total_iters=warmup_steps)
-        lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, lr_scheduler], milestones=[warmup_steps])
-    model_engine.lr_scheduler = lr_scheduler
     
     # Initialize data loaders
     train_data.post_init(
@@ -462,6 +448,19 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
             config.get('eval_micro_batch_size_per_gpu', model_engine.train_micro_batch_size_per_gpu()),
             config['eval_gradient_accumulation_steps'],
         )
+    
+    # NOW we can create the learning rate scheduler after dataset is initialized
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=len(train_data) // config['gradient_accumulation_steps'] * config['epochs'],
+    )
+    
+    # Apply warmup scheduler if configured
+    if config['warmup_steps'] > 0:
+        warmup_steps = config['warmup_steps']
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1/warmup_steps, total_iters=warmup_steps)
+        lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, lr_scheduler], milestones=[warmup_steps])
+    model_engine.lr_scheduler = lr_scheduler
     
     # Set communication data type
     communication_data_type = config['adapter']['dtype'] if 'adapter' in config else config['model']['dtype']
