@@ -194,7 +194,8 @@ def apply_dropout_to_lora_b(model, dropout_prob):
     for name, module in model.named_modules():
         if hasattr(module, 'lora_B'):
             # Create a binary mask with dropout probability
-            mask = torch.bernoulli(torch.ones_like(module.lora_B[0]) * (1 - dropout_prob))
+            # lora_B is a tensor, not a list or dict, so we don't need to index it with [0]
+            mask = torch.bernoulli(torch.ones_like(module.lora_B) * (1 - dropout_prob))
             # Apply the mask to lora_B
             module.lora_B.data = module.lora_B.data * mask.to(module.lora_B.device)
 
