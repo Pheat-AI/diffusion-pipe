@@ -193,11 +193,29 @@ def apply_dropout_to_lora_b(model, dropout_prob):
     """Apply dropout to the B matrix in LoRA layers"""
     for name, module in model.named_modules():
         if hasattr(module, 'lora_B'):
-            # Create a binary mask with dropout probability
-            # lora_B is a tensor, not a list or dict, so we don't need to index it with [0]
-            mask = torch.bernoulli(torch.ones_like(module.lora_B) * (1 - dropout_prob))
-            # Apply the mask to lora_B
-            module.lora_B.data = module.lora_B.data * mask.to(module.lora_B.device)
+            # Check if lora_B is a ModuleDict (contains multiple layers)
+            if isinstance(module.lora_B, nn.ModuleDict):
+                # Apply dropout to each layer in the ModuleDict
+                for layer_name, layer in module.lora_B.items():
+                    # Create a binary mask with dropout probability
+                    mask = torch.bernoulli(torch.ones_like(layer) * (1 - dropout_prob))
+                    # Apply the mask to the layer
+                    layer.data = layer.data * mask.to(layer.device)
+            # If lora_B is a tensor
+            elif isinstance(module.lora_B, torch.Tensor):
+                # Create a binary mask with dropout probability
+                mask = torch.bernoulli(torch.ones_like(module.lora_B) * (1 - dropout_prob))
+                # Apply the mask to lora_B
+                module.lora_B.data = module.lora_B.data * mask.to(module.lora_B.device)
+            # If lora_B is a Parameter
+            elif isinstance(module.lora_B, nn.Parameter):
+                # Create a binary mask with dropout probability
+                mask = torch.bernoulli(torch.ones_like(module.lora_B.data) * (1 - dropout_prob))
+                # Apply the mask to lora_B
+                module.lora_B.data = module.lora_B.data * mask.to(module.lora_B.device)
+            else:
+                if is_main_process():
+                    print(f"Warning: lora_B is of type {type(module.lora_B)}, which is not supported for dropout. Skipping.")
 
 
 def mask_text_tokens(text_tokens, mask_prob):
