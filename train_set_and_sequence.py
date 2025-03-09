@@ -128,8 +128,9 @@ def print_model_info(model):
     
     print(f'Model type: {model.name}')
     
-    # Check if diffusion model is loaded
-    if not hasattr(model, 'diffusion_model') or model.diffusion_model is None:
+    # Check if diffusion model is loaded using a safer approach
+    # Directly check the __dict__ instead of using hasattr which triggers __getattr__
+    if 'diffusion_model' not in model.__dict__ or model.__dict__['diffusion_model'] is None:
         print("Diffusion model not loaded yet. Load the model before printing detailed parameters.")
         return
         
