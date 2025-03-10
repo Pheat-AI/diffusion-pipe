@@ -845,19 +845,9 @@ if __name__ == '__main__':
     # Now print detailed model info
     print_model_info(model)
     
-    # Load dataset
-    dataset_config = toml.load(config['dataset'])
-    
-    # For model-specific validation
-    model.model_specific_dataset_config_validation(dataset_config)
-    
-    # Create dataset manager
-    caching_batch_size = config.get('caching_batch_size', 1)
-    dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=args.regenerate_cache, caching_batch_size=caching_batch_size)
-    
-    # Create dataset
-    train_data = dataset_util.Dataset(dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
-    dataset_manager.register(train_data)
+    # Check for required dataset configurations
+    if 'stage1_dataset' not in config or 'stage2_dataset' not in config:
+        raise ValueError("Config must include both 'stage1_dataset' and 'stage2_dataset' paths for Set-and-Sequence training")
     
     # Create evaluation datasets
     eval_data_map = {}
@@ -870,15 +860,17 @@ if __name__ == '__main__':
             config_path = eval_dataset['config']
         with open(config_path) as f:
             eval_dataset_config = toml.load(f)
+        
+        # For model-specific validation
+        model.model_specific_dataset_config_validation(eval_dataset_config)
+        
         eval_data_map[name] = dataset_util.Dataset(eval_dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
-        dataset_manager.register(eval_data_map[name])
-    
-    # Cache datasets
-    dataset_manager.cache()
     
     # Exit if only caching
     if args.cache_only:
-        quit()
+        # We'll cache datasets in run_both_stages
+        if is_main_process():
+            print("Cache-only mode: datasets will be cached during stage initialization")
     
     # Run both stages sequentially
-    run_both_stages(config, train_data, eval_data_map, run_dir, args.resume_from_checkpoint) 
+    run_both_stages(config, None, eval_data_map, run_dir, args.resume_from_checkpoint) 
