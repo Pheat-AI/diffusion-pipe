@@ -542,7 +542,7 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
     
     # Initialize tensorboard writer and saver
     epoch = train_dataloader.epoch
-    tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() and config['enable_tensorboard'] else None
+    tb_writer = None
     saver = utils.saver.Saver(args, config, True, run_dir, model, train_dataloader, model_engine, pipeline_model)
     
     # Evaluate before first step if configured
@@ -812,6 +812,8 @@ if __name__ == '__main__':
         raise ValueError(f'Config file {args.config} does not exist')
     
     config = toml.load(args.config)
+    # FORCE DISABLE TENSORBOARD
+    config['enable_tensorboard'] = False
     set_config_defaults(config)
     
     # Initialize DeepSpeed before caching
