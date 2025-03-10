@@ -263,36 +263,13 @@ def train_stage1_identity_basis(model, config, train_data, eval_data_map, run_di
         if trainable_params == 0:
             print("WARNING: No trainable parameters found!")
     
-    # Start training
+    # Start training - the saver will be created inside train_model
     train_model(model, config, train_data, eval_data_map, run_dir, resume_from_checkpoint, 
                 stage=1, dropout_prob=dropout_prob)
     
-    # Save the Identity Basis LoRA in ComfyUI-compatible format
+    # The identity basis LoRA is saved by the saver in train_model
     if is_main_process():
-        print("Saving Identity Basis LoRA in ComfyUI-compatible format")
-        identity_basis_dir = Path(run_dir) / "identity_basis"
-        os.makedirs(identity_basis_dir, exist_ok=True)
-        
-        # Get state dict of the LoRA
-        state_dict = {}
-        for name, p in model.transformer.named_parameters():
-            if hasattr(p, 'original_name') and p.requires_grad:
-                state_dict[p.original_name] = p.data.detach().cpu()
-        
-        # Save in ComfyUI format
-        model.peft_config.save_pretrained(identity_basis_dir)
-        
-        # Format state dict according to model's convention (e.g., for Wan model, prefix with 'diffusion_model.')
-        if model.name == 'wan':
-            state_dict = {'diffusion_model.'+k: v for k, v in state_dict.items()}
-        elif model.name == 'hunyuan-video':
-            state_dict = {'transformer.'+k: v for k, v in state_dict.items()}
-        
-        # Save the adapter model
-        safetensors.torch.save_file(state_dict, identity_basis_dir / 'identity_basis_adapter_model.safetensors', metadata={'format': 'pt'})
-        
-        
-        print(f"Identity Basis LoRA saved to {identity_basis_dir}")
+        print(f"Identity Basis LoRA saved to {run_dir}/identity_basis")
 
 
 def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_dir, resume_from_checkpoint, identity_basis_path):
@@ -331,35 +308,13 @@ def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_d
         if is_main_process():
             print(f"Warning: Model of type {type(model.transformer)} does not support LoRA freezing. Skipping.")
     
-    # Start training
+    # Start training - the saver will be created inside train_model
     train_model(model, config, train_data, eval_data_map, run_dir, resume_from_checkpoint, 
                 stage=2, dropout_prob=dropout_prob)
     
-    # Save the final combined LoRA (Identity Basis + Motion Residual) in ComfyUI-compatible format
+    # The combined LoRA is saved by the saver in train_model
     if is_main_process():
-        print("Saving combined Identity Basis + Motion Residual LoRA in ComfyUI-compatible format")
-        combined_lora_dir = Path(run_dir) / "combined_lora"
-        os.makedirs(combined_lora_dir, exist_ok=True)
-        
-        # Get state dict of the LoRA
-        state_dict = {}
-        for name, p in model.transformer.named_parameters():
-            if hasattr(p, 'original_name'):
-                state_dict[p.original_name] = p.data.detach().cpu()
-        
-        # Save in ComfyUI format
-        model.peft_config.save_pretrained(combined_lora_dir)
-        
-        # Format state dict according to model's convention (e.g., for Wan model, prefix with 'diffusion_model.')
-        if model.name == 'wan':
-            state_dict = {'diffusion_model.'+k: v for k, v in state_dict.items()}
-        elif model.name == 'hunyuan-video':
-            state_dict = {'transformer.'+k: v for k, v in state_dict.items()}
-        
-        # Save the adapter model
-        safetensors.torch.save_file(state_dict, combined_lora_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
-        
-        print(f"Combined LoRA saved to {combined_lora_dir}")
+        print(f"Combined LoRA saved to {run_dir}/combined_lora")
 
 
 def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_checkpoint, stage=1, dropout_prob=0.0):
@@ -555,6 +510,8 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
     # Initialize tensorboard writer and saver
     epoch = train_dataloader.epoch
     tb_writer = None
+    
+    # Create the saver exactly as in train.py
     saver = utils.saver.Saver(args, config, True, run_dir, model, train_dataloader, model_engine, pipeline_model)
     
     # Evaluate before first step if configured
@@ -639,6 +596,25 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
         
         # Check if training is complete
         if epoch >= config['epochs']:
+            # Save the final model based on the stage
+            if stage == 1:
+                # Save Identity Basis LoRA
+                identity_basis_dir = os.path.join(run_dir, "identity_basis")
+                if is_main_process():
+                    os.makedirs(identity_basis_dir, exist_ok=True)
+                # Create a new saver for the identity basis
+                identity_saver = utils.saver.Saver(args, config, True, identity_basis_dir, model, train_dataloader, model_engine, pipeline_model)
+                # Save the adapter
+                identity_saver.save_adapter("adapter")
+            elif stage == 2:
+                # Save Combined LoRA
+                combined_lora_dir = os.path.join(run_dir, "combined_lora")
+                if is_main_process():
+                    os.makedirs(combined_lora_dir, exist_ok=True)
+                # Create a new saver for the combined LoRA
+                combined_saver = utils.saver.Saver(args, config, True, combined_lora_dir, model, train_dataloader, model_engine, pipeline_model)
+                # Save the adapter
+                combined_saver.save_adapter("adapter")
             break
         
         step += 1
