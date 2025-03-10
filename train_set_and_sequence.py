@@ -286,8 +286,7 @@ def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_d
     # Set lower dropout for B matrix in LoRA for Stage 2
     dropout_prob = config['set_and_sequence']['stage2_dropout']
     
-    model.load_adapter_weights(identity_basis_path)
-    
+    model.load_adapter_weights(identity_basis_path + "/adapter")
     # Freeze the A matrices (identity basis) and only train the B matrices (motion residuals)
     # For DeepSpeed PipelineModule
     if hasattr(model, 'forward_funcs'):
