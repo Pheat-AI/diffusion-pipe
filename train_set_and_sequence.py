@@ -674,15 +674,16 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     # Wait for all processes
     dist.barrier()
     
-    # For Stage 1, modify dataset config to use static frames
-    dataset_config = toml.load(config['dataset'])
-    for directory in dataset_config.get('directory', []):
-        directory['static_frames'] = True
+    # Load Stage 1 dataset config (static frames)
+    if 'stage1_dataset' not in config:
+        raise ValueError("Config must include 'stage1_dataset' path for Set-and-Sequence training")
+    
+    stage1_dataset_config = toml.load(config['stage1_dataset'])
     
     # Create dataset manager and dataset for Stage 1
     caching_batch_size = config.get('caching_batch_size', 1)
     stage1_dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=args.regenerate_cache, caching_batch_size=caching_batch_size)
-    stage1_dataset = dataset_util.Dataset(dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
+    stage1_dataset = dataset_util.Dataset(stage1_dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
     stage1_dataset_manager.register(stage1_dataset)
     
     # Register eval datasets
@@ -732,14 +733,15 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     # Wait for all processes
     dist.barrier()
     
-    # For Stage 2, modify dataset config to use full video sequences
-    dataset_config = toml.load(config['dataset'])
-    for directory in dataset_config.get('directory', []):
-        directory['static_frames'] = False
+    # Load Stage 2 dataset config (full video sequences)
+    if 'stage2_dataset' not in config:
+        raise ValueError("Config must include 'stage2_dataset' path for Set-and-Sequence training")
+    
+    stage2_dataset_config = toml.load(config['stage2_dataset'])
     
     # Create dataset manager and dataset for Stage 2
     stage2_dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=args.regenerate_cache, caching_batch_size=caching_batch_size)
-    stage2_dataset = dataset_util.Dataset(dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
+    stage2_dataset = dataset_util.Dataset(stage2_dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
     stage2_dataset_manager.register(stage2_dataset)
     
     # Register eval datasets
