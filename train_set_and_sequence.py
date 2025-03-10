@@ -315,9 +315,24 @@ def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_d
     model.load_adapter_weights(identity_basis_path)
     
     # Freeze the A matrices (identity basis) and only train the B matrices (motion residuals)
-    for name, param in model.transformer.named_parameters():
-        if 'lora_A' in name:
-            param.requires_grad = False
+    # For DeepSpeed PipelineModule
+    if hasattr(model.transformer, 'forward_funcs'):
+        # Iterate through the layers in the pipeline
+        for layer_idx, layer in enumerate(model.transformer.forward_funcs):
+            # Check if the layer has modules
+            if hasattr(layer, 'module'):
+                # Freeze LoRA A matrices in all modules in the layer
+                for name, module in layer.module.named_parameters():
+                    if 'lora_A' in name:
+                        module.requires_grad = False
+    # For regular PyTorch modules
+    elif hasattr(model.transformer, 'named_parameters'):
+        for name, param in model.transformer.named_parameters():
+            if 'lora_A' in name:
+                param.requires_grad = False
+    else:
+        if is_main_process():
+            print(f"Warning: Model of type {type(model.transformer)} does not support LoRA freezing. Skipping.")
     
     # Start training
     train_model(model, config, train_data, eval_data_map, run_dir, resume_from_checkpoint, 
@@ -733,7 +748,7 @@ def run_both_stages(config, train_data, eval_data_map, run_dir, resume_from_chec
     # Create a new model instance for Stage 2
     if model_type == 'wan':
         from models.wan import WanPipeline
-        model = WanPipeline(config['model'])
+        model = WanPipeline(config)
     
     # Print model info
     print_model_info(model)
