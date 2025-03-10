@@ -291,8 +291,6 @@ def train_stage1_identity_basis(model, config, train_data, eval_data_map, run_di
         # Save the adapter model
         safetensors.torch.save_file(state_dict, identity_basis_dir / 'identity_basis_adapter_model.safetensors', metadata={'format': 'pt'})
         
-        # Also save a copy as adapter_model.safetensors for compatibility
-        safetensors.torch.save_file(state_dict, identity_basis_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
         
         print(f"Identity Basis LoRA saved to {identity_basis_dir}")
 
@@ -311,15 +309,7 @@ def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_d
     # Set lower dropout for B matrix in LoRA for Stage 2
     dropout_prob = config['set_and_sequence']['stage2_dropout']
     
-    # Specify the exact safetensors file to load
-    adapter_file = os.path.join(identity_basis_path, 'adapter_model.safetensors')
-    if not os.path.exists(adapter_file):
-        raise ValueError(f"Adapter file {adapter_file} does not exist")
-    
-    # Load the identity basis and freeze it
-    if is_main_process():
-        print(f"Loading specific adapter file: {adapter_file}")
-    model.load_adapter_weights(adapter_file)
+    model.load_adapter_weights(identity_basis_path)
     
     # Freeze the A matrices (identity basis) and only train the B matrices (motion residuals)
     # For DeepSpeed PipelineModule
