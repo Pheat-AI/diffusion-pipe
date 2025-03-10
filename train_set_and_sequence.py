@@ -311,14 +311,21 @@ def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_d
     # Set lower dropout for B matrix in LoRA for Stage 2
     dropout_prob = config['set_and_sequence']['stage2_dropout']
     
+    # Specify the exact safetensors file to load
+    adapter_file = os.path.join(identity_basis_path, 'adapter_model.safetensors')
+    if not os.path.exists(adapter_file):
+        raise ValueError(f"Adapter file {adapter_file} does not exist")
+    
     # Load the identity basis and freeze it
-    model.load_adapter_weights(identity_basis_path)
+    if is_main_process():
+        print(f"Loading specific adapter file: {adapter_file}")
+    model.load_adapter_weights(adapter_file)
     
     # Freeze the A matrices (identity basis) and only train the B matrices (motion residuals)
     # For DeepSpeed PipelineModule
-    if hasattr(model.transformer, 'forward_funcs'):
+    if hasattr(model, 'forward_funcs'):
         # Iterate through the layers in the pipeline
-        for layer_idx, layer in enumerate(model.transformer.forward_funcs):
+        for layer_idx, layer in enumerate(model.forward_funcs):
             # Check if the layer has modules
             if hasattr(layer, 'module'):
                 # Freeze LoRA A matrices in all modules in the layer
@@ -326,8 +333,8 @@ def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_d
                     if 'lora_A' in name:
                         module.requires_grad = False
     # For regular PyTorch modules
-    elif hasattr(model.transformer, 'named_parameters'):
-        for name, param in model.transformer.named_parameters():
+    elif hasattr(model, 'named_parameters'):
+        for name, param in model.named_parameters():
             if 'lora_A' in name:
                 param.requires_grad = False
     else:
