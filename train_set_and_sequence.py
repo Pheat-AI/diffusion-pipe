@@ -192,31 +192,25 @@ def evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accu
 def apply_dropout_to_lora_b(model, dropout_prob):
     """Apply dropout to LoRA B matrices in a DeepSpeed PipelineModule"""
     # For DeepSpeed PipelineModule
-    if hasattr(model, 'forward_funcs'):
-        # Iterate through the layers in the pipeline
-        for layer_idx, layer in enumerate(model.forward_funcs):
-            # Check if the layer has modules
-            if hasattr(layer, 'module'):
-                # Apply dropout to all modules in the layer
-                for name, module in layer.module.named_modules():
-                    if hasattr(module, 'lora_dropout'):
-                        # Apply dropout to LoRA B matrices
-                        if dropout_prob > 0:
-                            module.lora_dropout.p = dropout_prob
-                        else:
-                            module.lora_dropout.p = 0.0
-    # For regular PyTorch modules
-    elif hasattr(model, 'named_modules'):
-        for name, module in model.named_modules():
-            if hasattr(module, 'lora_dropout'):
-                # Apply dropout to LoRA B matrices
-                if dropout_prob > 0:
-                    module.lora_dropout.p = dropout_prob
-                else:
-                    module.lora_dropout.p = 0.0
-    else:
-        if is_main_process():
-            print(f"Warning: Model of type {type(model)} does not support LoRA dropout. Skipping.")
+    for name, module in model.named_modules():
+        if hasattr(module, 'lora_dropout'):
+            # Apply dropout to LoRA B matrices
+            if dropout_prob > 0:
+                module.lora_dropout.p = dropout_prob
+            else:
+                module.lora_dropout.p = 0.0
+        # For regular PyTorch modules
+        elif hasattr(model, 'named_modules'):
+            for name, module in model.named_modules():
+                if hasattr(module, 'lora_dropout'):
+                    # Apply dropout to LoRA B matrices
+                    if dropout_prob > 0:
+                        module.lora_dropout.p = dropout_prob
+                    else:
+                        module.lora_dropout.p = 0.0
+        else:
+            if is_main_process():
+                print(f"Warning: Model of type {type(model)} does not support LoRA dropout. Skipping.")
 
 
 def mask_text_tokens(text_tokens, mask_prob):
@@ -286,28 +280,13 @@ def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_d
     # Set lower dropout for B matrix in LoRA for Stage 2
     dropout_prob = config['set_and_sequence']['stage2_dropout']
     
+    # Load adapter weights
     model.load_adapter_weights(identity_basis_path + "/adapter")
-    # Freeze the A matrices (identity basis) and only train the B matrices (motion residuals)
-    # For DeepSpeed PipelineModule
-    if hasattr(model, 'forward_funcs'):
-        # Iterate through the layers in the pipeline
-        for layer_idx, layer in enumerate(model.forward_funcs):
-            # Check if the layer has modules
-            if hasattr(layer, 'module'):
-                # Freeze LoRA A matrices in all modules in the layer
-                for name, module in layer.module.named_parameters():
-                    if 'lora_A' in name:
-                        module.requires_grad = False
-    # For regular PyTorch modules
-    elif hasattr(model, 'named_parameters'):
-        for name, param in model.named_parameters():
-            if 'lora_A' in name:
-                param.requires_grad = False
-    else:
-        if is_main_process():
-            print(f"Warning: Model of type {type(model.transformer)} does not support LoRA freezing. Skipping.")
     
-    # Start training - the saver will be created inside train_model
+    # Freeze the A matrices (identity basis) and only train the B matrices (motion residuals)
+    # We'll do this in train_model after the pipeline_model is created
+    
+    # Start training
     train_model(model, config, train_data, eval_data_map, run_dir, resume_from_checkpoint, 
                 stage=2, dropout_prob=dropout_prob)
     
@@ -420,6 +399,16 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
         **additional_pipeline_module_kwargs
     )
     
+    # If this is Stage 2, freeze the LoRA A matrices
+    if stage == 2:
+        if is_main_process():
+            print("Freezing LoRA A matrices for Stage 2")
+        for name, param in pipeline_model.named_parameters():
+            if 'lora_A' in name:
+                if is_main_process():
+                    print(f"Freezing parameter: {name}")
+                param.requires_grad = False
+    
     # Configure DeepSpeed engine
     ds_config = {
         'train_micro_batch_size_per_gpu': config['micro_batch_size_per_gpu'],
@@ -528,7 +517,7 @@ def train_model(model, config, train_data, eval_data_map, run_dir, resume_from_c
     # Main training loop
     while True:
         # Apply dropout to LoRA B matrices
-        apply_dropout_to_lora_b(model_engine, dropout_prob)
+        apply_dropout_to_lora_b(pipeline_model, dropout_prob)
         
         # Apply text token masking if configured
         if text_token_mask_prob > 0 and hasattr(train_dataloader, 'current_batch') and 'text_tokens' in train_dataloader.current_batch:
