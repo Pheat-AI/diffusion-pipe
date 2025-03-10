@@ -277,11 +277,11 @@ def train_stage2_motion_residual(model, config, train_data, eval_data_map, run_d
     if is_main_process():
         print("Starting Stage 2: Motion Residual Encoding")
         print("Training on full video sequence to learn motion dynamics")
-        print(f"Loading Identity Basis from: {identity_basis_path}")
+        print(f"Loading Identity Basis from: {identity_basis_path}/adapter")
     
     # Load the identity basis from Stage 1
-    if not os.path.exists(identity_basis_path):
-        raise ValueError(f"Identity Basis path {identity_basis_path} does not exist")
+    if not os.path.exists(identity_basis_path + "/adapter"):
+        raise ValueError(f"Identity Basis path {identity_basis_path}/adapter does not exist")
     
     # Set lower dropout for B matrix in LoRA for Stage 2
     dropout_prob = config['set_and_sequence']['stage2_dropout']
