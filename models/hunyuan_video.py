@@ -15,6 +15,7 @@ from loguru import logger
 
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
 from utils.common import AUTOCAST_DTYPE, load_safetensors
+from utils.offloading import ModelOffloader
 from hyvideo.config import add_network_args, add_extra_models_args, add_denoise_schedule_args, add_inference_args, sanity_check_args
 from hyvideo.modules import load_model
 from hyvideo.vae import load_vae
@@ -195,6 +196,8 @@ class HunyuanVideoPipeline(BasePipeline):
     def __init__(self, config):
         self.config = config
         self.model_config = self.config['model']
+        self.offloader_double = ModelOffloader('dummy', [], 0, 0, True, torch.device('cuda'), False, debug=False)
+        self.offloader_single = ModelOffloader('dummy', [], 0, 0, True, torch.device('cuda'), False, debug=False)
 
         dtype = self.model_config['dtype']
 
@@ -481,13 +484,62 @@ class HunyuanVideoPipeline(BasePipeline):
     def to_layers(self):
         transformer = self.transformer
         layers = [InitialLayer(transformer)]
-        for block in transformer.double_blocks:
-            layers.append(DoubleBlock(block))
+        for i, block in enumerate(transformer.double_blocks):
+            layers.append(DoubleBlock(block, i, self.offloader_double))
         layers.append(concatenate_hidden_states)
-        for block in transformer.single_blocks:
-            layers.append(SingleBlock(block))
+        for i, block in enumerate(transformer.single_blocks):
+            layers.append(SingleBlock(block, i, self.offloader_single))
         layers.append(OutputLayer(transformer))
         return layers
+
+    def enable_block_swap(self, blocks_to_swap):
+        transformer = self.transformer
+        double_blocks = transformer.double_blocks
+        single_blocks = transformer.single_blocks
+        num_double_blocks = len(double_blocks)
+        num_single_blocks = len(single_blocks)
+        double_blocks_to_swap = blocks_to_swap // 2
+        # This swaps more than blocks_to_swap total blocks. A bit odd, but the model does have twice as many
+        # single blocks as double. I'm just replicating the behavior of Musubi Tuner.
+        single_blocks_to_swap = (blocks_to_swap - double_blocks_to_swap) * 2 + 1
+
+        assert double_blocks_to_swap <= num_double_blocks - 2 and single_blocks_to_swap <= num_single_blocks - 2, (
+            f'Cannot swap more than {num_double_blocks - 2} double blocks and {num_single_blocks - 2} single blocks. '
+            f'Requested {double_blocks_to_swap} double blocks and {single_blocks_to_swap} single blocks.'
+        )
+
+        self.offloader_double = ModelOffloader(
+            'DoubleBlock', double_blocks, num_double_blocks, double_blocks_to_swap, True, torch.device('cuda'), self.config['reentrant_activation_checkpointing']
+        )
+        self.offloader_single = ModelOffloader(
+            'SingleBlock', single_blocks, num_single_blocks, single_blocks_to_swap, True, torch.device('cuda'), self.config['reentrant_activation_checkpointing']
+        )
+        transformer.double_blocks = None
+        transformer.single_blocks = None
+        transformer.to('cuda')
+        transformer.double_blocks = double_blocks
+        transformer.single_blocks = single_blocks
+        self.prepare_block_swap_training()
+        print(
+            f'Block swap enabled. Swapping {blocks_to_swap} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}.'
+        )
+
+    def prepare_block_swap_training(self):
+        self.offloader_double.enable_block_swap()
+        self.offloader_double.set_forward_only(False)
+        self.offloader_double.prepare_block_devices_before_forward()
+        self.offloader_single.enable_block_swap()
+        self.offloader_single.set_forward_only(False)
+        self.offloader_single.prepare_block_devices_before_forward()
+
+    def prepare_block_swap_inference(self, disable_block_swap=False):
+        if disable_block_swap:
+            self.offloader_double.disable_block_swap()
+            self.offloader_single.disable_block_swap()
+        self.offloader_double.set_forward_only(True)
+        self.offloader_double.prepare_block_devices_before_forward()
+        self.offloader_single.set_forward_only(True)
+        self.offloader_single.prepare_block_devices_before_forward()
 
 
 class InitialLayer(nn.Module):
@@ -569,14 +621,20 @@ class InitialLayer(nn.Module):
 
 
 class DoubleBlock(nn.Module):
-    def __init__(self, block):
+    def __init__(self, block, block_idx, offloader):
         super().__init__()
         self.block = block
+        self.block_idx = block_idx
+        self.offloader = offloader
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         img, txt, vec, cu_seqlens, max_seqlen, freqs_cos, freqs_sin, txt_seq_len, img_seq_len, unpatchify_args = inputs
+
+        self.offloader.wait_for_block(self.block_idx)
         img, txt = self.block(img, txt, vec, cu_seqlens, cu_seqlens, max_seqlen.item(), max_seqlen.item(), (freqs_cos, freqs_sin))
+        self.offloader.submit_move_blocks_forward(self.block_idx)
+
         return make_contiguous(img, txt, vec, cu_seqlens, max_seqlen, freqs_cos, freqs_sin, txt_seq_len, img_seq_len, unpatchify_args)
 
 
@@ -587,14 +645,20 @@ def concatenate_hidden_states(inputs):
 
 
 class SingleBlock(nn.Module):
-    def __init__(self, block):
+    def __init__(self, block, block_idx, offloader):
         super().__init__()
         self.block = block
+        self.block_idx = block_idx
+        self.offloader = offloader
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         x, vec, cu_seqlens, max_seqlen, freqs_cos, freqs_sin, txt_seq_len, img_seq_len, unpatchify_args = inputs
+
+        self.offloader.wait_for_block(self.block_idx)
         x = self.block(x, vec, txt_seq_len.item(), cu_seqlens, cu_seqlens, max_seqlen.item(), max_seqlen.item(), (freqs_cos, freqs_sin))
+        self.offloader.submit_move_blocks_forward(self.block_idx)
+
         return make_contiguous(x, vec, cu_seqlens, max_seqlen, freqs_cos, freqs_sin, txt_seq_len, img_seq_len, unpatchify_args)
 
 class OutputLayer(nn.Module):

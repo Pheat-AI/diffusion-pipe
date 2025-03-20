@@ -7,6 +7,7 @@ import time
 import random
 import json
 import inspect
+from pathlib import Path
 
 import toml
 import deepspeed
@@ -21,10 +22,12 @@ import numpy as np
 
 from utils import dataset as dataset_util
 from utils import common
-from utils.common import is_main_process, get_rank, DTYPE_MAP
+from utils.common import is_main_process, get_rank, DTYPE_MAP, empty_cuda_cache
 import utils.saver
 from utils.isolate_rng import isolate_rng
 from utils.patches import apply_patches
+from utils.unsloth_utils import unsloth_checkpoint
+from utils.pipeline import ManualPipelineModule
 
 TIMESTEP_QUANTILES_FOR_EVAL = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
@@ -37,6 +40,8 @@ parser.add_argument('--resume_from_checkpoint', nargs='?', const=True, default=N
 parser.add_argument('--regenerate_cache', action='store_true', default=None, help='Force regenerate cache. Useful if none of the files have changed but their contents have, e.g. modified captions.')
 parser.add_argument('--cache_only', action='store_true', default=None, help='Cache model inputs then exit.')
 parser.add_argument('--i_know_what_i_am_doing', action='store_true', default=None, help="Skip certain checks and overrides. You may end up using settings that won't work.")
+parser.add_argument('--master_port', type=int, default=29500, help='Master port for distributed training')
+parser.add_argument('--dump_dataset', type=Path, default=None, help='Decode cached latents and dump the dataset to this directory.')
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
 
@@ -61,6 +66,7 @@ def set_config_defaults(config):
 
     config.setdefault('pipeline_stages', 1)
     config.setdefault('activation_checkpointing', False)
+    config['reentrant_activation_checkpointing'] = (config['activation_checkpointing'] == 'unsloth')
     config.setdefault('warmup_steps', 0)
     if 'save_dtype' in config:
         config['save_dtype'] = DTYPE_MAP[config['save_dtype']]
@@ -165,15 +171,39 @@ def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_acc
         pbar.close()
 
 
-def evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps):
+def evaluate(model, model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps, disable_block_swap):
     if len(eval_dataloaders) == 0:
         return
+    empty_cuda_cache()
+    model.prepare_block_swap_inference(disable_block_swap=disable_block_swap)
     with torch.no_grad(), isolate_rng():
         seed = get_rank()
         random.seed(seed)
         torch.manual_seed(seed)
         np.random.seed(seed)
         _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps)
+    empty_cuda_cache()
+    model.prepare_block_swap_training()
+
+
+def distributed_init(args):
+    """Initialize distributed training environment."""
+    world_size = int(os.getenv('WORLD_SIZE', '1'))
+    rank = int(os.getenv('RANK', '0'))
+    local_rank = args.local_rank
+
+    # Set environment variables for distributed training
+    os.environ['MASTER_ADDR'] = os.getenv('MASTER_ADDR', 'localhost')
+    os.environ['MASTER_PORT'] = str(args.master_port)
+
+    return world_size, rank, local_rank
+
+
+def get_prodigy_d(optimizer):
+    d = 0
+    for group in optimizer.param_groups:
+        d += group['d']
+    return d / len(optimizer.param_groups)
 
 
 if __name__ == '__main__':
@@ -189,6 +219,15 @@ if __name__ == '__main__':
     set_config_defaults(config)
     common.AUTOCAST_DTYPE = config['model']['dtype']
 
+    # Initialize distributed environment before deepspeed
+    world_size, rank, local_rank = distributed_init(args)
+
+    # Now initialize deepspeed
+    deepspeed.init_distributed()
+
+    # needed for broadcasting Queue in dataset.py
+    torch.cuda.set_device(dist.get_rank())
+
     resume_from_checkpoint = (
         args.resume_from_checkpoint if args.resume_from_checkpoint is not None
         else config.get('resume_from_checkpoint', False)
@@ -197,10 +236,6 @@ if __name__ == '__main__':
         args.regenerate_cache if args.regenerate_cache is not None
         else config.get('regenerate_cache', False)
     )
-
-    deepspeed.init_distributed()
-    # needed for broadcasting Queue in dataset.py (because we haven't called deepspeed.initialize() yet?)
-    torch.cuda.set_device(dist.get_rank())
 
     model_type = config['model']['type']
     if model_type == 'hunyuan-video':
@@ -218,6 +253,9 @@ if __name__ == '__main__':
     elif model_type == 'wan':
         from models import wan
         model = wan.WanPipeline(config)
+    elif model_type == 'chroma':
+        from models import chroma
+        model = chroma.ChromaPipeline(config)
     else:
         raise NotImplementedError(f'Model type {model_type} is not implemented')
 
@@ -296,6 +334,35 @@ if __name__ == '__main__':
     #     count += 1
     # quit()
 
+    if args.dump_dataset:
+        # only works for flux
+        import torchvision
+        dataset_manager.cache(unload_models=False)
+        if is_main_process():
+            with torch.no_grad():
+                os.makedirs(args.dump_dataset, exist_ok=True)
+                vae = model.vae.to('cuda')
+                train_data.post_init(
+                    0,
+                    1,
+                    1,
+                    1,
+                )
+                for i, item in enumerate(train_data):
+                    latents = item['latents']
+                    latents = latents / vae.config.scaling_factor
+                    if hasattr(vae.config, 'shift_factor') and vae.config.shift_factor is not None:
+                        latents = latents + vae.config.shift_factor
+                    img = vae.decode(latents.to(vae.device, vae.dtype)).sample.to(torch.float32)
+                    img = img.squeeze(0)
+                    img = ((img + 1) / 2).clamp(0, 1)
+                    pil_img = torchvision.transforms.functional.to_pil_image(img)
+                    pil_img.save(args.dump_dataset / f'{i}.png')
+                    if i >= 100:
+                        break
+        dist.barrier()
+        quit()
+
     dataset_manager.cache()
     if args.cache_only:
         quit()
@@ -331,19 +398,44 @@ if __name__ == '__main__':
     else:  # Not resuming, use most recent (newly created) dir
         run_dir = get_most_recent_run_dir(config['output_dir'])
 
+    # Block swapping
+    if blocks_to_swap := config.get('blocks_to_swap', 0):
+        assert config['pipeline_stages'] == 1, 'Block swapping only works with pipeline_stages=1'
+        assert 'adapter' in config, 'Block swapping only works when training LoRA'
+        # Don't automatically move to GPU, we'll do that ourselves.
+        def to(self, *args, **kwargs):
+            pass
+        deepspeed.pipe.PipelineModule.to = to
+        model.enable_block_swap(blocks_to_swap)
+
     layers = model.to_layers()
     additional_pipeline_module_kwargs = {}
-    if config['activation_checkpointing']:
-        checkpoint_func = deepspeed.checkpointing.non_reentrant_checkpoint
+    activation_checkpointing = config['activation_checkpointing']
+    if activation_checkpointing:
+        if activation_checkpointing == True:
+            # TODO: block swapping doesn't work with Deepspeed non-reentrant checkpoint, but PyTorch native one is fine. Some
+            # weights end up on CPU where they shouldn't. Why? Are we giving anything up by not using the Deepspeed implementation?
+            #checkpoint_func = deepspeed.checkpointing.non_reentrant_checkpoint
+            from functools import partial
+            checkpoint_func = partial(torch.utils.checkpoint.checkpoint, use_reentrant=False)
+        elif activation_checkpointing == 'unsloth':
+            checkpoint_func = unsloth_checkpoint
+        else:
+            raise NotImplementedError(f'activation_checkpointing={activation_checkpointing} is not implemented')
         additional_pipeline_module_kwargs.update({
             'activation_checkpoint_interval': 1,
             'checkpointable_layers': model.checkpointable_layers,
             'activation_checkpoint_func': checkpoint_func,
         })
-    pipeline_model = deepspeed.pipe.PipelineModule(
+
+    num_stages = config.get('pipeline_stages', 1)
+    partition_method=config.get('partition_method', 'parameters')
+    partition_split = config.get('partition_split',[len(layers) / num_stages])
+    pipeline_model = ManualPipelineModule(
         layers=layers,
-        num_stages=config['pipeline_stages'],
-        partition_method=config.get('partition_method', 'parameters'),
+        num_stages=num_stages,
+        partition_method=partition_method,
+        manual_partition_split=partition_split,
         loss_fn=model.get_loss_fn(),
         **additional_pipeline_module_kwargs
     )
@@ -351,37 +443,39 @@ if __name__ == '__main__':
 
     def get_optimizer(model_parameters):
         optim_config = config['optimizer']
-        optim_type = optim_config['type'].lower()
+        optim_type = optim_config['type']
+        optim_type_lower = optim_type.lower()
 
         args = []
         kwargs = {k: v for k, v in optim_config.items() if k not in ['type', 'gradient_release']}
 
-        if optim_type == 'adamw':
+        if optim_type_lower == 'adamw':
             # TODO: fix this. I'm getting "fatal error: cuda_runtime.h: No such file or directory"
             # when Deepspeed tries to build the fused Adam extension.
             # klass = deepspeed.ops.adam.FusedAdam
             klass = torch.optim.AdamW
-        elif optim_type == 'adamw8bit':
+        elif optim_type_lower == 'adamw8bit':
             import bitsandbytes
             klass = bitsandbytes.optim.AdamW8bit
-        elif optim_type == 'adamw_optimi':
+        elif optim_type_lower == 'adamw_optimi':
             import optimi
             klass = optimi.AdamW
-        elif optim_type == 'stableadamw':
+        elif optim_type_lower == 'stableadamw':
             import optimi
             klass = optimi.StableAdamW
-        elif optim_type == 'sgd':
+        elif optim_type_lower == 'sgd':
             klass = torch.optim.SGD
-        elif optim_type == 'adamw8bitkahan':
+        elif optim_type_lower == 'adamw8bitkahan':
             from optimizers import adamw_8bit
             klass = adamw_8bit.AdamW8bitKahan
-        elif optim_type == 'offload':
+        elif optim_type_lower == 'offload':
             from torchao.prototype.low_bit_optim import CPUOffloadOptimizer
             klass = CPUOffloadOptimizer
             args.append(torch.optim.AdamW)
             kwargs['fused'] = True
         else:
-            raise NotImplementedError(optim_type)
+            import pytorch_optimizer
+            klass = getattr(pytorch_optimizer, optim_type)
 
         if optim_config.get('gradient_release', False):
             # Prevent deepspeed from logging every single param group lr
@@ -522,8 +616,9 @@ if __name__ == '__main__':
     tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() and config['enable_tensorboard'] else None
     saver = utils.saver.Saver(args, config, is_adapter, run_dir, model, train_dataloader, model_engine, pipeline_model)
 
+    disable_block_swap_for_eval = config.get('disable_block_swap_for_eval', False)
     if config['eval_before_first_step'] and not resume_from_checkpoint:
-        evaluate(model_engine, eval_dataloaders, tb_writer, 0, config['eval_gradient_accumulation_steps'])
+        evaluate(model, model_engine, eval_dataloaders, tb_writer, 0, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
 
     # TODO: this is state we need to save and resume when resuming from checkpoint. It only affects logging.
     epoch_loss = 0
@@ -541,9 +636,12 @@ if __name__ == '__main__':
 
         if is_main_process() and tb_writer is not None and step % config['logging_steps'] == 0:
             tb_writer.add_scalar(f'train/loss', loss, step)
+            if optimizer.__class__.__name__ == 'Prodigy':
+                prodigy_d = get_prodigy_d(optimizer)
+                tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, step)
 
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
-            evaluate(model_engine, eval_dataloaders, tb_writer, step, config['eval_gradient_accumulation_steps'])
+            evaluate(model, model_engine, eval_dataloaders, tb_writer, step, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
 
         if finished_epoch:
             if is_main_process() and tb_writer is not None:
