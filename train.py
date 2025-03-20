@@ -19,6 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import multiprocess as mp
 import numpy as np
+import wandb
 
 from utils import dataset as dataset_util
 from utils import common
@@ -100,6 +101,10 @@ def set_config_defaults(config):
     config.setdefault('eval_every_n_epochs', None)
     config.setdefault('eval_before_first_step', True)
     config.setdefault('enable_tensorboard', False)
+    config.setdefault('enable_wandb', False)
+    config.setdefault('wandb_project', 'diffusion-training')
+    config.setdefault('wandb_name', None)
+    config.setdefault('wandb_entity', None)
 
 
 def get_most_recent_run_dir(output_dir):
@@ -161,13 +166,19 @@ def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_acc
             losses.append(loss)
             if is_main_process() and tb_writer is not None:
                 tb_writer.add_scalar(f'{name}/loss_quantile_{quantile:.2f}', loss, step)
+                if config.get('enable_wandb', False):
+                    wandb.log({f'{name}/loss_quantile_{quantile:.2f}': loss, "step": step})
         avg_loss = sum(losses) / len(losses)
         if is_main_process() and tb_writer is not None:
             tb_writer.add_scalar(f'{name}/loss', avg_loss, step)
+            if config.get('enable_wandb', False):
+                wandb.log({f'{name}/loss': avg_loss, "step": step})
 
     duration = time.time() - start
     if is_main_process() and tb_writer is not None:
         tb_writer.add_scalar('eval/eval_time_sec', duration, step)
+        if config.get('enable_wandb', False):
+            wandb.log({'eval/eval_time_sec': duration, "step": step})
         pbar.close()
 
 
@@ -259,14 +270,20 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError(f'Model type {model_type} is not implemented')
 
-    # import sys, PIL
-    # test_image = sys.argv[1]
-    # with torch.no_grad():
-    #     vae = model.get_vae().to('cuda')
-    #     latents = dataset.encode_pil_to_latents(PIL.Image.open(test_image), vae)
-    #     pil_image = dataset.decode_latents_to_pil(latents, vae)
-    #     pil_image.save('test.jpg')
-    # quit()
+    # Initialize wandb if enabled
+    if config.get('enable_wandb', False) and is_main_process():
+        wandb_config = {k: v for k, v in config.items()}
+        wandb_project = config.get('wandb_project', 'diffusion-training')
+        wandb_name = config.get('wandb_name', None)
+        wandb_entity = config.get('wandb_entity', None)
+        wandb.login()
+        wandb.init(
+            project=wandb_project,
+            name=wandb_name,
+            entity=wandb_entity,
+            config=wandb_config,
+            dir=config.get('output_dir', './runs')
+        )
 
     with open(config['dataset']) as f:
         dataset_config = toml.load(f)
@@ -639,6 +656,8 @@ if __name__ == '__main__':
             if optimizer.__class__.__name__ == 'Prodigy':
                 prodigy_d = get_prodigy_d(optimizer)
                 tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, step)
+                if config.get('enable_wandb', False):
+                    wandb.log({'train/prodigy_d': prodigy_d, "step": step})
 
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
             evaluate(model, model_engine, eval_dataloaders, tb_writer, step, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
@@ -646,11 +665,12 @@ if __name__ == '__main__':
         if finished_epoch:
             if is_main_process() and tb_writer is not None:
                 tb_writer.add_scalar(f'train/epoch_loss', epoch_loss/num_steps, epoch)
+                if config.get('enable_wandb', False):
+                    wandb.log({f'train/epoch_loss': epoch_loss/num_steps, "epoch": epoch, "step": step})
             epoch_loss = 0
             num_steps = 0
             epoch = new_epoch
             if epoch is None:
-
                 break
 
         saver.process_step(step)
@@ -664,3 +684,5 @@ if __name__ == '__main__':
 
     if is_main_process():
         print('TRAINING COMPLETE!')
+        if config.get('enable_wandb', False):
+            wandb.finish()
