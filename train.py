@@ -15,7 +15,6 @@ from deepspeed import comm as dist
 from deepspeed.runtime.pipe import module as ds_pipe_module
 import torch
 from torch import nn
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import multiprocess as mp
 import numpy as np
@@ -100,7 +99,6 @@ def set_config_defaults(config):
     config.setdefault('eval_every_n_steps', None)
     config.setdefault('eval_every_n_epochs', None)
     config.setdefault('eval_before_first_step', True)
-    config.setdefault('enable_tensorboard', False)
     config.setdefault('enable_wandb', False)
     config.setdefault('wandb_project', 'diffusion-training')
     config.setdefault('wandb_name', None)
@@ -149,7 +147,7 @@ def evaluate_single(model_engine, eval_dataloader, eval_gradient_accumulation_st
     return total_loss / count
 
 
-def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps):
+def _evaluate(model_engine, eval_dataloaders, step, eval_gradient_accumulation_steps):
     pbar_total = 0
     for eval_dataloader in eval_dataloaders.values():
         pbar_total += len(eval_dataloader) * len(TIMESTEP_QUANTILES_FOR_EVAL) // eval_gradient_accumulation_steps
@@ -165,25 +163,22 @@ def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_acc
         for quantile in TIMESTEP_QUANTILES_FOR_EVAL:
             loss = evaluate_single(model_engine, eval_dataloader, eval_gradient_accumulation_steps, quantile, pbar=pbar)
             losses.append(loss)
-            if is_main_process() and tb_writer is not None:
-                tb_writer.add_scalar(f'{name}/loss_quantile_{quantile:.2f}', loss, step)
+            if is_main_process():
                 if config.get('enable_wandb', False):
                     wandb.log({f'{name}/loss_quantile_{quantile:.2f}': loss, "step": step})
         avg_loss = sum(losses) / len(losses)
-        if is_main_process() and tb_writer is not None:
-            tb_writer.add_scalar(f'{name}/loss', avg_loss, step)
+        if is_main_process():
             if config.get('enable_wandb', False):
                 wandb.log({f'{name}/loss': avg_loss, "step": step})
 
     duration = time.time() - start
-    if is_main_process() and tb_writer is not None:
-        tb_writer.add_scalar('eval/eval_time_sec', duration, step)
+    if is_main_process():
         if config.get('enable_wandb', False):
             wandb.log({'eval/eval_time_sec': duration, "step": step})
         pbar.close()
 
 
-def evaluate(model, model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps, disable_block_swap):
+def evaluate(model, model_engine, eval_dataloaders, step, eval_gradient_accumulation_steps, disable_block_swap):
     if len(eval_dataloaders) == 0:
         return
     empty_cuda_cache()
@@ -193,7 +188,7 @@ def evaluate(model, model_engine, eval_dataloaders, tb_writer, step, eval_gradie
         random.seed(seed)
         torch.manual_seed(seed)
         np.random.seed(seed)
-        _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps)
+        _evaluate(model_engine, eval_dataloaders, step, eval_gradient_accumulation_steps)
     empty_cuda_cache()
     model.prepare_block_swap_training()
 
@@ -633,12 +628,11 @@ if __name__ == '__main__':
     }
 
     epoch = train_dataloader.epoch
-    tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() and config['enable_tensorboard'] else None
     saver = utils.saver.Saver(args, config, is_adapter, run_dir, model, train_dataloader, model_engine, pipeline_model)
 
     disable_block_swap_for_eval = config.get('disable_block_swap_for_eval', False)
     if config['eval_before_first_step'] and not resume_from_checkpoint:
-        evaluate(model, model_engine, eval_dataloaders, tb_writer, 0, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
+        evaluate(model, model_engine, eval_dataloaders, 0, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
 
     # TODO: this is state we need to save and resume when resuming from checkpoint. It only affects logging.
     epoch_loss = 0
@@ -654,20 +648,19 @@ if __name__ == '__main__':
         new_epoch, checkpointed, saved = saver.process_epoch(epoch, step)
         finished_epoch = True if new_epoch != epoch else False
 
-        if is_main_process() and tb_writer is not None and step % config['logging_steps'] == 0:
-            tb_writer.add_scalar(f'train/loss', loss, step)
+        if is_main_process() and step % config['logging_steps'] == 0:
+            if config.get('enable_wandb', False):
+                wandb.log({'train/loss': loss, "step": step})
             if optimizer.__class__.__name__ == 'Prodigy':
                 prodigy_d = get_prodigy_d(optimizer)
-                tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, step)
                 if config.get('enable_wandb', False):
                     wandb.log({'train/prodigy_d': prodigy_d, "step": step})
 
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
-            evaluate(model, model_engine, eval_dataloaders, tb_writer, step, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
+            evaluate(model, model_engine, eval_dataloaders, step, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
 
         if finished_epoch:
-            if is_main_process() and tb_writer is not None:
-                tb_writer.add_scalar(f'train/epoch_loss', epoch_loss/num_steps, epoch)
+            if is_main_process():
                 if config.get('enable_wandb', False):
                     wandb.log({f'train/epoch_loss': epoch_loss/num_steps, "epoch": epoch, "step": step})
             epoch_loss = 0
