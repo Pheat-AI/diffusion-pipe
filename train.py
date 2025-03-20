@@ -104,6 +104,7 @@ def set_config_defaults(config):
     config.setdefault('enable_wandb', False)
     config.setdefault('wandb_project', 'diffusion-training')
     config.setdefault('wandb_name', None)
+    config.setdefault('wandb_id', None)
     config.setdefault('wandb_entity', None)
 
 
@@ -275,14 +276,16 @@ if __name__ == '__main__':
         wandb_config = {k: v for k, v in config.items()}
         wandb_project = config.get('wandb_project', 'diffusion-training')
         wandb_name = config.get('wandb_name', None)
+        wandb_id = config.get('wandb_id', None)
         wandb_entity = config.get('wandb_entity', None)
         wandb.login()
         wandb.init(
             project=wandb_project,
             name=wandb_name,
+            id=wandb_id,
             entity=wandb_entity,
             config=wandb_config,
-            dir=config.get('output_dir', './runs')
+            dir=config.get('output_dir', './runs'),
         )
 
     with open(config['dataset']) as f:
