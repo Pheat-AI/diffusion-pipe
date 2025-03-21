@@ -280,7 +280,6 @@ if __name__ == '__main__':
             id=wandb_id,
             entity=wandb_entity,
             config=wandb_config,
-            dir=config.get('output_dir', './runs'),
         )
 
     with open(config['dataset']) as f:
